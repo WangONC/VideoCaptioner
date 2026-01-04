@@ -6,8 +6,8 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Literal, Optional
 
-from ..utils.logger import setup_logger
 from ..utils.ass_auto_wrap import auto_wrap_ass_file
+from ..utils.logger import setup_logger
 
 logger = setup_logger("video_utils")
 
@@ -218,8 +218,10 @@ def add_subtitles(
                 vcodec,
                 "-preset",
                 quality,
-                "-b:v",
-                str(video_info["video_bitrate_kbps"]) + "k",  # 使用原始的视频流码率
+                # "-b:v",
+                # str(video_info["video_bitrate_kbps"]) + "k",  # 使用原始的视频流码率
+                "-crf",
+                "18", # 无损下的恒定质量模式
                 "-vf",
                 vf,
                 "-y",  # 覆盖输出文件
@@ -304,7 +306,6 @@ def get_video_info(file_path: str) -> Optional[Dict]:
     try:
         cmd = ["ffmpeg", "-i", file_path]
 
-        # logger.info(f"获取视频信息执行命令: {' '.join(cmd)}")
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -345,7 +346,7 @@ def get_video_info(file_path: str) -> Optional[Dict]:
 
         # 提取视频流信息
         if video_stream_match := re.search(
-            r"Stream #.*?Video: (\w+)(?:\s*\([^)]*\))?.* (\d+)x(\d+).*?(?:(\d+) kb/s).*?(?:(\d+(?:\.\d+)?)\s*(?:fps|tb[rn]))",
+            r"Stream #.*?Video: (\w+)(?:\s*\([^)]*\))?.* (\d+)x(\d+).*?(?:(\d+) kb/s)?.*?(?:(\d+(?:\.\d+)?)\s*(?:fps|tb[rn]))",
             info,
             re.DOTALL,
         ):
@@ -354,14 +355,55 @@ def get_video_info(file_path: str) -> Optional[Dict]:
                     "video_codec": video_stream_match.group(1),
                     "width": int(video_stream_match.group(2)),
                     "height": int(video_stream_match.group(3)),
-                    "video_bitrate_kbps": video_stream_match.group(4),
+                    "video_bitrate_kbps": (
+                        int(video_stream_match.group(4))
+                        if video_stream_match.group(4)
+                        else 0
+                    ),
                     "fps": float(video_stream_match.group(5)),
                 }
             )
         else:
             logger.warning("未找到视频流信息")
 
+        # 如果视频流没有比特率信息，通过重新封装来计算
+        if (
+            video_info_dict["video_bitrate_kbps"] == 0
+            and video_info_dict["duration_seconds"] > 0
+        ):
+            logger.info(f"检测到VBR视频，正在计算实际比特率...")
+
+            # 运行 ffmpeg -c copy -f null - 来获取实际数据大小
+            calc_cmd = ["ffmpeg", "-i", file_path, "-c", "copy", "-f", "null", "-"]
+
+            calc_result = subprocess.run(
+                calc_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=(
+                    subprocess.CREATE_NO_WINDOW
+                    if hasattr(subprocess, "CREATE_NO_WINDOW")
+                    else 0
+                ),
+            )
+            calc_info = calc_result.stderr
+
+            if video_size_match := re.search(r"video:(\d+)kB", calc_info):
+                video_size_kb = int(video_size_match.group(1))
+                duration_sec = video_info_dict["duration_seconds"]
+
+                # 计算视频流比特率: (KB * 8192 bits/KB) / 秒 / 1000 = kbps
+                video_bitrate = (video_size_kb * 8192) / duration_sec / 1000
+                video_info_dict["video_bitrate_kbps"] = round(video_bitrate, 2)
+
+                logger.info(
+                    f"计算得到视频流比特率: {video_info_dict['video_bitrate_kbps']} kbps"
+                )
+
         return video_info_dict
+
     except Exception as e:
-        logger.exception(f"获取视频信息时出错: {str(e)}")
+        logger.error(f"获取视频信息失败: {e}")
         return None
