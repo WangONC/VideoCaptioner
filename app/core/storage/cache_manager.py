@@ -71,7 +71,7 @@ class CacheManager(BaseManager):
         """清理过期缓存"""
         cleanup_date = datetime.utcnow() - CACHE_CONFIG["max_age"]
         try:
-            with self.db_manager.get_session() as session:
+            with self.db_manager.get_session(write=True) as session:
                 for model in [TranslationCache, LLMCache]:
                     session.query(model).filter(
                         model.created_at < cleanup_date
@@ -112,7 +112,15 @@ class CacheManager(BaseManager):
 
         hash_key = self._generate_hash(text, params)
         try:
-            with self.db_manager.get_session() as session:
+            with self.db_manager.get_session(write=True) as session:
+                existing_translation = (
+                    session.query(TranslationCache)
+                    .filter_by(content_hash=hash_key, translator_type=translator_type)
+                    .first()
+                )
+                if existing_translation:
+                    return
+
                 translation = TranslationCache(
                     source_text=text,
                     translated_text=translated_text,
@@ -152,7 +160,15 @@ class CacheManager(BaseManager):
 
         hash_key = self._generate_hash(prompt, params)
         try:
-            with self.db_manager.get_session() as session:
+            with self.db_manager.get_session(write=True) as session:
+                existing_result = (
+                    session.query(LLMCache)
+                    .filter_by(content_hash=hash_key, model_name=model_name)
+                    .first()
+                )
+                if existing_result:
+                    return
+
                 llm_result = LLMCache(
                     prompt=prompt,
                     result=result,
@@ -178,7 +194,7 @@ class CacheManager(BaseManager):
             raise ValueError("Token count cannot be negative")
 
         try:
-            with self.db_manager.get_session() as session:
+            with self.db_manager.get_session(write=True) as session:
                 stats = (
                     session.query(UsageStatistics)
                     .filter_by(operation_type=operation_type, service_name=service_name)
@@ -262,7 +278,7 @@ class CacheManager(BaseManager):
             raise ValueError("CRC32 hex, ASR type and result data cannot be empty")
 
         try:
-            with self.db_manager.get_session() as session:
+            with self.db_manager.get_session(write=True) as session:
                 # 检查是否已存在相同的缓存
                 existing_cache = (
                     session.query(ASRCache)
@@ -323,7 +339,7 @@ class ServiceUsageManager(BaseManager):
 
         today = date.today()
         try:
-            with self.db_manager.get_session() as session:
+            with self.db_manager.get_session(write=True) as session:
                 try:
                     result = (
                         session.query(DailyServiceUsage)

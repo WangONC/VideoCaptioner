@@ -25,7 +25,11 @@ from app.common.signal_bus import signalBus
 from app.components.EditComboBoxSettingCard import EditComboBoxSettingCard
 from app.components.LineEditSettingCard import LineEditSettingCard
 from app.config import AUTHOR, FEEDBACK_URL, HELP_URL, RELEASE_URL, VERSION, YEAR
-from app.core.entities import LLMServiceEnum, TranscribeModelEnum, TranslatorServiceEnum
+from app.core.entities import (
+    LLMServiceEnum,
+    TranscribeModelEnum,
+    TranslatorServiceEnum,
+)
 from app.core.utils.test_opanai import get_openai_models, test_openai
 from app.thread.version_manager_thread import VersionManager
 from app.components.MySettingCard import ComboBoxSettingCard as MyComboBoxSettingCard
@@ -761,6 +765,7 @@ class SettingInterface(ScrollArea):
 
         # 更新布局
         self.translate_serviceGroup.adjustSize()
+        self.translateGroup.adjustSize()
         self.expandLayout.update()
 
 

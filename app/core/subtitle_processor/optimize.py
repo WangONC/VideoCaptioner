@@ -117,7 +117,7 @@ class SubtitleOptimizer:
                 result = future.result()
                 optimized_dict.update(result)
             except Exception as e:
-                logger.error(f"优化块失败：{str(e)}")
+                logger.error(f"优化块失败：{str(e.with_traceback(e.__traceback__))}")
                 # 对于失败的块，保留原文
                 for k, v in chunk.items():
                     optimized_dict[k] = v

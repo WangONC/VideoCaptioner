@@ -27,10 +27,34 @@ from app.core.subtitle_processor.prompt import (
 )
 from app.core.storage.cache_manager import CacheManager
 from app.config import CACHE_PATH
+from app.core.entities import (
+    LANGUAGES,
+)
 from app.core.utils.logger import setup_logger
 
 
 logger = setup_logger("subtitle_translator")
+
+
+TRANSLATEGEMMA_LANGUAGE_CODES = {
+    "简体中文": "zh-Hans",
+    "繁体中文": "zh-Hant",
+    "中文": "zh",
+}
+
+
+TRANSLATEGEMMA_LANGUAGE_NAMES = {
+    "简体中文": "Simplified Chinese",
+    "繁体中文": "Traditional Chinese",
+    "中文": "Chinese",
+}
+
+
+TRANSLATEGEMMA_CODE_TO_ENGLISH = {
+    code: name
+    for name, code in LANGUAGES.items()
+    if re.fullmatch(r"[A-Za-z][A-Za-z' -]*", name)
+}
 
 
 class TranslatorType(Enum):
@@ -188,6 +212,7 @@ class OpenAITranslator(BaseTranslator):
         thread_num: int = 10,
         batch_num: int = 20,
         target_language: str = "Chinese",
+        source_language: str = "English",
         model: str = "gpt-4o-mini",
         custom_prompt: str = "",
         is_reflect: bool = False,
@@ -207,6 +232,7 @@ class OpenAITranslator(BaseTranslator):
 
         self._init_client()
         self.model = model
+        self.source_language = source_language
         self.custom_prompt = custom_prompt
         self.is_reflect = is_reflect
         self.temperature = temperature
@@ -225,6 +251,8 @@ class OpenAITranslator(BaseTranslator):
         logger.info(
             f"[+]正在翻译字幕：{next(iter(subtitle_chunk))} - {next(reversed(subtitle_chunk))}"
         )
+        if self._is_translategemma_model():
+            return self._translate_chunk_translategemma(subtitle_chunk)
 
         # 获取提示词
         if self.is_reflect:
@@ -260,7 +288,9 @@ class OpenAITranslator(BaseTranslator):
                     prompt, json.dumps(subtitle_chunk, ensure_ascii=False)
                 )
                 # 解析结果
-                result = json_repair.loads(response.choices[0].message.content)
+                result = self._parse_json_object_response(
+                    response.choices[0].message.content
+                )
                 # 检查翻译结果数量是否匹配
                 if len(result) != len(subtitle_chunk):
                     logger.warning(f"翻译结果数量不匹配，将使用单条翻译模式重试")
@@ -286,13 +316,85 @@ class OpenAITranslator(BaseTranslator):
                 logger.error(f"翻译失败：{str(e)}")
                 raise RuntimeError(f"OpenAI API调用失败：{str(e)}")
 
+    def _translate_chunk_translategemma(
+        self, subtitle_chunk: Dict[str, str]
+    ) -> Dict[str, str]:
+        prompt = self._build_translategemma_batch_completion_prompt(subtitle_chunk)
+        prompt_hash = hashlib.md5(
+            f"translategemma_batch|{self.source_language}|{self.target_language}".encode()
+        ).hexdigest()
+
+        cache_params = {
+            "target_language": self.target_language,
+            "is_reflect": False,
+            "temperature": 0,
+            "prompt_hash": prompt_hash,
+        }
+        cache_key = json.dumps(subtitle_chunk, ensure_ascii=False)
+
+        try:
+            cache_result = self.cache_manager.get_llm_result(
+                cache_key,
+                self.model,
+                **cache_params,
+            )
+
+            if cache_result:
+                result = json.loads(cache_result)
+            else:
+                response = self.client.completions.create(
+                    model=self.model,
+                    prompt=prompt,
+                    temperature=0,
+                    timeout=self.timeout,
+                )
+                result_text = self._extract_response_text(response)
+                result_text = self._extract_translated_text(result_text)
+                result = self._parse_translategemma_batch_result(result_text)
+
+                if not isinstance(result, dict):
+                    raise ValueError("TranslateGemma 批量翻译结果不是 JSON 对象")
+                if len(result) != len(subtitle_chunk):
+                    raise ValueError("TranslateGemma 批量翻译结果数量不匹配")
+
+                self.cache_manager.set_llm_result(
+                    cache_key,
+                    json.dumps(result, ensure_ascii=False),
+                    self.model,
+                    **cache_params,
+                )
+
+            normalized_result = {}
+            for key in subtitle_chunk:
+                if key not in result:
+                    raise ValueError(f"TranslateGemma 缺少字幕键: {key}")
+                normalized_result[key] = str(result[key]).strip()
+
+            return normalized_result
+        except Exception as e:
+            logger.warning(f"TranslateGemma 批量翻译失败，回退单条翻译：{str(e)}")
+            return self._translate_chunk_single(subtitle_chunk)
+
+    @staticmethod
+    def _parse_translategemma_batch_result(result_text: str) -> Dict[str, Any]:
+        result = OpenAITranslator._parse_json_object_response(result_text)
+        if isinstance(result, dict):
+            return result
+        raise ValueError("TranslateGemma 批量翻译结果不是 JSON 对象")
+
     def _translate_chunk_single(self, subtitle_chunk: Dict[str, str]) -> Dict[str, str]:
         """单条翻译模式"""
         result = {}
-        single_prompt = Template(SINGLE_TRANSLATE_PROMPT).safe_substitute(
-            target_language=self.target_language
-        )
-        prompt_hash = hashlib.md5(single_prompt.encode()).hexdigest()
+        if self._is_translategemma_model():
+            single_prompt = "translategemma_raw_completion"
+            prompt_hash = hashlib.md5(
+                f"{single_prompt}|{self.source_language}|{self.target_language}".encode()
+            ).hexdigest()
+        else:
+            single_prompt = Template(SINGLE_TRANSLATE_PROMPT).safe_substitute(
+                target_language=self.target_language
+            )
+            prompt_hash = hashlib.md5(single_prompt.encode()).hexdigest()
         for idx, text in subtitle_chunk.items():
             try:
                 # 检查缓存
@@ -311,13 +413,10 @@ class OpenAITranslator(BaseTranslator):
                     continue
 
                 response = self._call_api(single_prompt, text)
-                translated_text = response.choices[0].message.content.strip()
+                translated_text = self._extract_response_text(response)
 
                 # 删除 DeepSeek-R1 等推理模型的思考过程 #300
-                translated_text = re.sub(
-                    r"<think>.*?</think>", "", translated_text, flags=re.DOTALL
-                )
-                translated_text = translated_text.strip()
+                translated_text = self._extract_translated_text(translated_text)
 
                 # 保存到缓存
                 self.cache_manager.set_llm_result(
@@ -334,8 +433,11 @@ class OpenAITranslator(BaseTranslator):
 
         return result
 
-    def _call_api(self, prompt: str, user_content: Dict[str, str]) -> Any:
+    def _call_api(self, prompt: str, user_content: Union[Dict[str, str], str]) -> Any:
         """调用OpenAI API"""
+        if self._is_translategemma_model():
+            return self._call_translategemma_api(str(user_content))
+
         messages = [
             {"role": "system", "content": prompt},
             {"role": "user", "content": user_content},
@@ -351,12 +453,179 @@ class OpenAITranslator(BaseTranslator):
     def _parse_response(self, response: Any) -> Dict[str, str]:
         """解析API响应"""
         try:
-            result = json_repair.loads(response.choices[0].message.content)
+            result = self._parse_json_object_response(response.choices[0].message.content)
             if self.is_reflect:
                 return {k: v["revised_translation"] for k, v in result.items()}
             return result
         except Exception as e:
             raise ValueError(f"解析翻译结果失败：{str(e)}")
+
+    def _is_translategemma_model(self) -> bool:
+        return "translategemma" in self.model.lower().replace(" ", "")
+
+    def _call_translategemma_api(self, text: str) -> Any:
+        prompt = self._build_translategemma_completion_prompt(text)
+        return self.client.completions.create(
+            model=self.model,
+            prompt=prompt,
+            temperature=0,
+            timeout=self.timeout,
+        )
+
+    @staticmethod
+    def _extract_translated_text(translated_text: str) -> str:
+        translated_text = re.sub(
+            r"<think>.*?</think>", "", translated_text, flags=re.DOTALL
+        )
+        translated_text = re.sub(
+            r"^```[a-zA-Z0-9_-]*\s*|\s*```$", "", translated_text, flags=re.DOTALL
+        )
+        translated_text = re.sub(
+            r"^(translation|translated text|译文)\s*[:：]\s*",
+            "",
+            translated_text,
+            flags=re.IGNORECASE,
+        )
+        translated_text = translated_text.replace("<end_of_turn>", "")
+        translated_text = translated_text.replace("<start_of_turn>model", "")
+        if "[COT]" in translated_text:
+            translated_text = translated_text.split("[COT]", 1)[0]
+        return translated_text.strip()
+
+    @staticmethod
+    def _extract_response_text(response: Any) -> str:
+        choice = response.choices[0]
+        message = getattr(choice, "message", None)
+        if message is not None and getattr(message, "content", None) is not None:
+            return str(message.content).strip()
+        return str(getattr(choice, "text", "")).strip()
+
+    @staticmethod
+    def _parse_json_object_response(text: str) -> Dict[str, Any]:
+        normalized_text = OpenAITranslator._normalize_json_like_text(text)
+        result = json_repair.loads(normalized_text)
+        if isinstance(result, dict):
+            return result
+        raise ValueError("返回结果不是 JSON 对象")
+
+    @staticmethod
+    def _normalize_json_like_text(text: str) -> str:
+        text = (
+            text.replace("“", '"')
+            .replace("”", '"')
+            .replace("‘", "'")
+            .replace("’", "'")
+        )
+
+        normalized_chars = []
+        in_string = False
+        escape = False
+        for char in text:
+            if in_string:
+                normalized_chars.append(char)
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+                normalized_chars.append(char)
+            elif char == "，":
+                normalized_chars.append(",")
+            elif char == "：":
+                normalized_chars.append(":")
+            else:
+                normalized_chars.append(char)
+
+        return "".join(normalized_chars)
+
+    @staticmethod
+    def _normalize_translategemma_lang_code(
+        language_name: Optional[str], is_target: bool
+    ) -> str:
+        if not language_name:
+            return "en"
+
+        if language_name in TRANSLATEGEMMA_LANGUAGE_CODES:
+            return TRANSLATEGEMMA_LANGUAGE_CODES[language_name]
+
+        code = LANGUAGES.get(language_name, language_name).replace("_", "-")
+        if is_target and code == "zh":
+            return "zh-Hans"
+        return code
+
+    def _build_translategemma_completion_prompt(self, text: str) -> str:
+        source_code = self._normalize_translategemma_lang_code(
+            self.source_language, is_target=False
+        )
+        target_code = self._normalize_translategemma_lang_code(
+            self.target_language, is_target=True
+        )
+        source_name = self._normalize_translategemma_language_name(
+            self.source_language
+        )
+        target_name = self._normalize_translategemma_language_name(
+            self.target_language
+        )
+
+        return (
+            "<bos><start_of_turn>user\n"
+            f"You are a professional {source_name} ({source_code}) to {target_name} ({target_code}) translator. "
+            f"Produce only the {target_name} translation, without any additional explanations or commentary. "
+            f"Please translate the following {source_name} text into {target_name}:\n\n\n"
+            f"{text}<end_of_turn>\n<start_of_turn>model\n"
+        )
+
+    def _build_translategemma_batch_completion_prompt(
+        self, subtitle_chunk: Dict[str, str]
+    ) -> str:
+        source_code = self._normalize_translategemma_lang_code(
+            self.source_language, is_target=False
+        )
+        target_code = self._normalize_translategemma_lang_code(
+            self.target_language, is_target=True
+        )
+        source_name = self._normalize_translategemma_language_name(
+            self.source_language
+        )
+        target_name = self._normalize_translategemma_language_name(
+            self.target_language
+        )
+        chunk_text = json.dumps(subtitle_chunk, ensure_ascii=False)
+
+        return (
+            "<bos><start_of_turn>user\n"
+            f"You are a professional {source_name} ({source_code}) to {target_name} ({target_code}) translator. "
+            f"Translate each subtitle entry into {target_name}. "
+            "Return only one JSON object with exactly the same keys. "
+            "Do not add explanations. Do not add markdown. Do not merge or split entries.\n"
+            "Input JSON:\n"
+            f"{chunk_text}\n"
+            "<end_of_turn>\n<start_of_turn>model\n"
+        )
+
+    @staticmethod
+    def _normalize_translategemma_language_name(language_name: Optional[str]) -> str:
+        if not language_name:
+            return "English"
+
+        if language_name in TRANSLATEGEMMA_LANGUAGE_NAMES:
+            return TRANSLATEGEMMA_LANGUAGE_NAMES[language_name]
+
+        code = LANGUAGES.get(language_name, language_name).replace("_", "-")
+        base_code = code.split("-", 1)[0]
+
+        if code in TRANSLATEGEMMA_CODE_TO_ENGLISH:
+            return TRANSLATEGEMMA_CODE_TO_ENGLISH[code]
+        if base_code in TRANSLATEGEMMA_CODE_TO_ENGLISH:
+            return TRANSLATEGEMMA_CODE_TO_ENGLISH[base_code]
+        if re.search(r"[A-Za-z]", language_name):
+            return language_name
+        return code
 
 
 class GoogleTranslator(BaseTranslator):
@@ -695,6 +964,7 @@ class TranslatorFactory:
         thread_num: int = 5,
         batch_num: int = 10,
         target_language: str = "Chinese",
+        source_language: str = "English",
         model: str = "gpt-4o-mini",
         custom_prompt: str = "",
         temperature: float = 0.7,
@@ -708,6 +978,7 @@ class TranslatorFactory:
                     thread_num=thread_num,
                     batch_num=batch_num,
                     target_language=target_language,
+                    source_language=source_language,
                     model=model,
                     custom_prompt=custom_prompt,
                     is_reflect=is_reflect,

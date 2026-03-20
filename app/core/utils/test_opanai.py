@@ -1,6 +1,22 @@
 import openai
 
 
+def _is_translategemma_model(model: str) -> bool:
+    return "translategemma" in model.lower().replace(" ", "")
+
+
+def _build_translategemma_prompt():
+    return (
+        "<bos><start_of_turn>user\n"
+        "You are a professional English (en) to Simplified Chinese (zh-Hans) translator. "
+        "Your goal is to accurately convey the meaning and nuances of the original English text "
+        "while adhering to Simplified Chinese grammar, vocabulary, and cultural sensitivities.\n"
+        "Produce only the Simplified Chinese translation, without any additional explanations or commentary. "
+        "Please translate the following English text into Simplified Chinese:\n\n\n"
+        "Hello!<end_of_turn>\n<start_of_turn>model\n"
+    )
+
+
 def test_openai(base_url, api_key, model):
     """
     这是一个测试OpenAI API的函数。
@@ -14,10 +30,19 @@ def test_openai(base_url, api_key, model):
     str: 错误信息或者AI助手的回复
     """
     try:
+        client = openai.OpenAI(base_url=base_url, api_key=api_key, timeout=10)
+
+        if _is_translategemma_model(model):
+            response = client.completions.create(
+                model=model,
+                prompt=_build_translategemma_prompt(),
+                max_tokens=100,
+                timeout=10,
+            )
+            return True, str(response.choices[0].text)
+
         # 创建OpenAI客户端并发送请求到OpenAI API
-        response = openai.OpenAI(
-            base_url=base_url, api_key=api_key, timeout=10
-        ).chat.completions.create(
+        response = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},

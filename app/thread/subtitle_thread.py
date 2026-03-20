@@ -7,7 +7,11 @@ from PyQt5.QtCore import QSettings, QThread, pyqtSignal
 
 from app.common.config import cfg
 from app.core.bk_asr.asr_data import ASRData
-from app.core.entities import SubtitleConfig, SubtitleTask, TranslatorServiceEnum
+from app.core.entities import (
+    SubtitleConfig,
+    SubtitleTask,
+    TranslatorServiceEnum,
+)
 from app.core.subtitle_processor.split import SubtitleSplitter
 from app.core.subtitle_processor.summarization import SubtitleSummarizer
 from app.core.subtitle_processor.optimize import SubtitleOptimizer
@@ -19,7 +23,10 @@ from app.core.storage.database import DatabaseManager
 from app.config import CACHE_PATH
 
 # 配置日志
-logger = setup_logger("subtitle_optimization_thread")
+logger = setup_logger(
+    "subtitle_optimization_thread",
+    info_fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
 
 class SubtitleThread(QThread):
@@ -43,7 +50,7 @@ class SubtitleThread(QThread):
     def set_custom_prompt_text(self, text: str):
         self.custom_prompt_text = text
 
-    def _setup_api_config(self) -> SubtitleConfig:
+    def _setup_api_config(self, model_name: str = "") -> SubtitleConfig:
         """设置API配置，返回SubtitleConfig"""
         public_base_url = "https://ddg.bkfeng.top/v1"
         if self.task.subtitle_config.base_url == public_base_url:
@@ -62,10 +69,11 @@ class SubtitleThread(QThread):
             return self.task.subtitle_config
 
         if self.task.subtitle_config.base_url and self.task.subtitle_config.api_key:
+            validate_model = model_name or self.task.subtitle_config.llm_model
             if not test_openai(
                 self.task.subtitle_config.base_url,
                 self.task.subtitle_config.api_key,
-                self.task.subtitle_config.llm_model,
+                validate_model,
             )[0]:
                 raise Exception(
                     self.tr(
@@ -85,7 +93,7 @@ class SubtitleThread(QThread):
 
     def run(self):
         try:
-            logger.info(f"\n===========字幕处理任务开始===========")
+            logger.info("===========字幕处理任务开始===========")
             logger.info(f"时间：{datetime.datetime.now()}")
 
             # 字幕文件路径检查、对断句字幕路径进行定义
@@ -125,7 +133,8 @@ class SubtitleThread(QThread):
                 )
             ):
                 self.progress.emit(2, self.tr("开始验证API配置..."))
-                subtitle_config = self._setup_api_config()
+                validate_model = subtitle_config.llm_model
+                subtitle_config = self._setup_api_config(validate_model)
                 os.environ["OPENAI_BASE_URL"] = subtitle_config.base_url
                 os.environ["OPENAI_API_KEY"] = subtitle_config.api_key
 
@@ -182,6 +191,7 @@ class SubtitleThread(QThread):
                     thread_num=subtitle_config.thread_num,
                     batch_num=subtitle_config.batch_size,
                     target_language=subtitle_config.target_language,
+                    source_language=subtitle_config.source_language,
                     model=subtitle_config.llm_model,
                     custom_prompt=custom_prompt,
                     is_reflect=subtitle_config.need_reflect,

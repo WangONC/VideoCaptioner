@@ -167,6 +167,7 @@ class TaskFactory:
             base_url=base_url,
             api_key=api_key,
             llm_model=llm_model,
+            source_language=cfg.transcribe_language.value.value,
             deeplx_endpoint=cfg.deeplx_endpoint.value,
             # 翻译服务
             translator_service=cfg.translator_service.value,
