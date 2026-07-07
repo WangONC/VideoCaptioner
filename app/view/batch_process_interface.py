@@ -129,11 +129,12 @@ class BatchProcessInterface(QWidget):
         self.task_table.customContextMenuRequested.connect(self.show_context_menu)
 
     def on_add_file_clicked(self):
-        task_type = self.task_type_combo.currentText()
+        task_type = BatchTaskType(self.task_type_combo.currentText())
         file_filter = ""
         if task_type in [
             BatchTaskType.TRANSCRIBE,
             BatchTaskType.TRANS_SUB,
+            BatchTaskType.TRANS_SPLIT,
             BatchTaskType.FULL_PROCESS,
         ]:
             # 获取所有支持的音视频格式
@@ -274,6 +275,7 @@ class BatchProcessInterface(QWidget):
         if task_type in [
             BatchTaskType.TRANSCRIBE,
             BatchTaskType.TRANS_SUB,
+            BatchTaskType.TRANS_SPLIT,
             BatchTaskType.FULL_PROCESS,
         ]:
             valid_extensions = {f".{fmt.value}" for fmt in SupportedAudioFormats} | {
@@ -315,6 +317,26 @@ class BatchProcessInterface(QWidget):
         status.setFont(font)
         self.task_table.setItem(row, 2, status)
 
+    def is_task_startable(self, status: str):
+        """等待和失败的任务都允许重新开始。"""
+        return status in (
+            str(BatchTaskStatus.WAITING),
+            str(BatchTaskStatus.FAILED),
+        ) or status.endswith("失败")
+
+    def is_task_failed(self, status: str):
+        return status == str(BatchTaskStatus.FAILED) or status.endswith("失败")
+
+    def reset_task_for_start(self, row: int):
+        progress_bar = self.task_table.cellWidget(row, 1)
+        if progress_bar:
+            progress_bar.setValue(0)
+
+        status_item = self.task_table.item(row, 2)
+        status_item.setText(str(BatchTaskStatus.RUNNING))
+        status_item.setToolTip("")
+        status_item.setForeground(Qt.gray)
+
     def show_context_menu(self, pos):
         row = self.task_table.rowAt(pos.y())
         if row < 0:
@@ -324,7 +346,10 @@ class BatchProcessInterface(QWidget):
         file_path = self.task_table.item(row, 0).toolTip()
         status = self.task_table.item(row, 2).text()
 
-        start_action = Action(FIF.PLAY, "开始")
+        start_action = Action(
+            FIF.PLAY,
+            "重新开始" if self.is_task_failed(status) else "开始",
+        )
         start_action.triggered.connect(lambda: self.start_task(file_path))
         menu.addAction(start_action)
 
@@ -337,7 +362,7 @@ class BatchProcessInterface(QWidget):
         open_folder_action.triggered.connect(lambda: self.open_output_folder(file_path))
         menu.addAction(open_folder_action)
 
-        if status != str(BatchTaskStatus.WAITING):
+        if not self.is_task_startable(status):
             start_action.setEnabled(False)
 
         menu.exec_(self.task_table.viewport().mapToGlobal(pos))
@@ -364,7 +389,10 @@ class BatchProcessInterface(QWidget):
                 progress_bar = self.task_table.cellWidget(row, 1)
                 progress_bar.setValue(progress)
                 # 更新状态
-                self.task_table.item(row, 2).setText(status)
+                status_item = self.task_table.item(row, 2)
+                status_item.setText(status)
+                status_item.setToolTip("")
+                status_item.setForeground(Qt.gray)
                 break
 
     def on_task_error(self, file_path: str, error: str):
@@ -373,13 +401,16 @@ class BatchProcessInterface(QWidget):
                 status_item = self.task_table.item(row, 2)
                 status_item.setText(str(BatchTaskStatus.FAILED))
                 status_item.setToolTip(error)
+                status_item.setForeground(QColor("#C42B1C"))
                 break
 
     def on_task_completed(self, file_path: str):
         for row in range(self.task_table.rowCount()):
             if self.task_table.item(row, 0).toolTip() == file_path:
-                self.task_table.item(row, 2).setText(str(BatchTaskStatus.COMPLETED))
-                self.task_table.item(row, 2).setForeground(QColor("#13A10E"))
+                status_item = self.task_table.item(row, 2)
+                status_item.setText(str(BatchTaskStatus.COMPLETED))
+                status_item.setToolTip("")
+                status_item.setForeground(QColor("#13A10E"))
                 break
 
     def start_all_tasks(self):
@@ -394,16 +425,16 @@ class BatchProcessInterface(QWidget):
             )
             return
 
-        # 检查是否有等待处理的任务
-        waiting_tasks = 0
+        # 检查是否有可处理的任务（首次等待 + 失败重试）
+        startable_tasks = 0
         for row in range(self.task_table.rowCount()):
-            if self.task_table.item(row, 2).text() == str(BatchTaskStatus.WAITING):
-                waiting_tasks += 1
+            if self.is_task_startable(self.task_table.item(row, 2).text()):
+                startable_tasks += 1
 
-        if waiting_tasks == 0:
+        if startable_tasks == 0:
             InfoBar.warning(
                 title="无待处理任务",
-                content="所有任务已经在处理或已完成",
+                content="没有等待处理或失败可重试的任务",
                 duration=2000,
                 position=InfoBarPosition.TOP,
                 parent=self,
@@ -413,7 +444,7 @@ class BatchProcessInterface(QWidget):
         # 显示开始处理的提示
         InfoBar.success(
             title="开始处理",
-            content=f"开始处理 {waiting_tasks} 个任务",
+            content=f"开始处理 {startable_tasks} 个任务",
             duration=2000,
             position=InfoBarPosition.TOP,
             parent=self,
@@ -422,12 +453,33 @@ class BatchProcessInterface(QWidget):
         for row in range(self.task_table.rowCount()):
             file_path = self.task_table.item(row, 0).toolTip()
             status = self.task_table.item(row, 2).text()
-            if status == str(BatchTaskStatus.WAITING):
+            if self.is_task_startable(status):
+                self.reset_task_for_start(row)
                 task_type = BatchTaskType(self.task_type_combo.currentText())
                 batch_task = BatchTask(file_path, task_type)
                 self.batch_thread.add_task(batch_task)
 
     def start_task(self, file_path: str):
+        target_row = -1
+        for row in range(self.task_table.rowCount()):
+            if self.task_table.item(row, 0).toolTip() == file_path:
+                target_row = row
+                break
+
+        if target_row < 0:
+            return
+
+        status = self.task_table.item(target_row, 2).text()
+        if not self.is_task_startable(status):
+            InfoBar.warning(
+                title="任务不可开始",
+                content="只有等待处理或失败的任务可以开始",
+                duration=2000,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+            return
+
         # 显示开始处理的提示
         file_name = os.path.basename(file_path)
         InfoBar.success(
@@ -439,6 +491,7 @@ class BatchProcessInterface(QWidget):
         )
 
         # 创建并添加单个任务
+        self.reset_task_for_start(target_row)
         task_type = BatchTaskType(self.task_type_combo.currentText())
         batch_task = BatchTask(file_path, task_type)
         self.batch_thread.add_task(batch_task)

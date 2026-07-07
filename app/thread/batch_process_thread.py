@@ -88,6 +88,8 @@ class BatchProcessThread(QThread):
                 self._handle_subtitle_task(batch_task)
             elif batch_task.task_type == BatchTaskType.TRANS_SUB:
                 self._handle_trans_sub_task(batch_task)
+            elif batch_task.task_type == BatchTaskType.TRANS_SPLIT:
+                self._handle_trans_split_task(batch_task)
             elif batch_task.task_type == BatchTaskType.FULL_PROCESS:
                 self._handle_full_process_task(batch_task)
             elif batch_task.task_type == BatchTaskType.SYNTHESIS:
@@ -101,6 +103,8 @@ class BatchProcessThread(QThread):
 
     def _on_progress_wrapper(self, batch_task: BatchTask, progress: int, message: str):
         """进度信号包装器"""
+        if batch_task.status == BatchTaskStatus.FAILED:
+            return
         self.task_progress.emit(batch_task.file_path, progress, message)
 
     def _on_error_wrapper(self, batch_task: BatchTask, error: str):
@@ -160,6 +164,65 @@ class BatchProcessThread(QThread):
 
         thread.start()
 
+    def _handle_trans_split_task(self, batch_task: BatchTask):
+        trans_task = self.factory.create_transcribe_task(
+            batch_task.file_path, need_next_task=True
+        )
+        trans_task.transcribe_config.need_word_time_stamp = True
+        thread = TranscriptThread(trans_task)
+        batch_task.current_thread = thread
+        self.current_tasks[batch_task.file_path] = batch_task
+
+        # 保存线程引用
+        self.threads.append(thread)
+
+        thread.progress.connect(
+            partial(self._on_trans_sub_progress_wrapper, batch_task),
+            Qt.QueuedConnection,
+        )
+        thread.error.connect(
+            partial(self._on_error_wrapper, batch_task), Qt.QueuedConnection
+        )
+        thread.finished.connect(
+            partial(self._on_trans_split_finished_wrapper, batch_task),
+            Qt.QueuedConnection,
+        )
+
+        thread.start()
+
+    def _on_trans_split_finished_wrapper(
+        self, batch_task: BatchTask, task: TranscribeTask
+    ):
+        if batch_task.current_thread in self.threads:
+            self.threads.remove(batch_task.current_thread)
+
+        subtitle_task = self.factory.create_subtitle_split_task(
+            task.output_path, batch_task.file_path, need_next_task=True
+        )
+        video_path = Path(batch_task.file_path)
+        subtitle_task.output_path = str(
+            video_path.parent / f"【断句字幕】{video_path.stem}.srt"
+        )
+        thread = SubtitleThread(subtitle_task)
+        batch_task.current_thread = thread
+        self.current_tasks[batch_task.file_path] = batch_task
+
+        # 保存线程引用
+        self.threads.append(thread)
+
+        thread.progress.connect(
+            partial(self._on_trans_sub_subtitle_progress_wrapper, batch_task),
+            Qt.QueuedConnection,
+        )
+        thread.error.connect(
+            partial(self._on_error_wrapper, batch_task), Qt.QueuedConnection
+        )
+        thread.finished.connect(
+            partial(self._on_finished_wrapper, batch_task), Qt.QueuedConnection
+        )
+
+        thread.start()
+
     def _handle_trans_sub_task(self, batch_task: BatchTask):
         task = self.factory.create_transcript_and_subtitle_task(batch_task.file_path)
         trans_task = self.factory.create_transcribe_task(
@@ -190,6 +253,8 @@ class BatchProcessThread(QThread):
         self, batch_task: BatchTask, progress: int, message: str
     ):
         """转录+字幕任务进度包装器"""
+        if batch_task.status == BatchTaskStatus.FAILED:
+            return
         progress = progress // 2  # 转录占50%进度
         self.task_progress.emit(batch_task.file_path, progress, message)
 
@@ -230,6 +295,8 @@ class BatchProcessThread(QThread):
         self, batch_task: BatchTask, progress: int, message: str
     ):
         """转录+字幕任务字幕进度包装器"""
+        if batch_task.status == BatchTaskStatus.FAILED:
+            return
         progress = 50 + progress // 2  # 字幕处理占后50%进度
         self.task_progress.emit(batch_task.file_path, progress, message)
 

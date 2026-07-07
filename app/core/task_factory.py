@@ -205,6 +205,25 @@ class TaskFactory:
         )
 
     @staticmethod
+    def create_subtitle_split_task(
+        file_path: str, video_path: Optional[str] = None, need_next_task: bool = False
+    ) -> SubtitleTask:
+        """创建仅断句的字幕任务，不执行翻译。"""
+        task = TaskFactory.create_subtitle_task(file_path, video_path, need_next_task)
+        output_name = (
+            Path(file_path)
+            .stem.replace("【原始字幕】", "")
+            .replace("【下载字幕】", "")
+        )
+        task.output_path = str(Path(file_path).parent / f"【断句字幕】{output_name}.srt")
+        task.subtitle_config.need_split = True
+        task.subtitle_config.need_translate = False
+        task.subtitle_config.need_optimize = False
+        task.subtitle_config.need_reflect = False
+        task.subtitle_config.subtitle_layout = "仅原文"
+        return task
+
+    @staticmethod
     def create_synthesis_task(
         video_path: str, subtitle_path: str, need_next_task: bool = False
     ) -> SynthesisTask:

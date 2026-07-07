@@ -668,6 +668,7 @@ class BatchTaskType(Enum):
     SUBTITLE = "批量字幕"
     SYNTHESIS = "批量合成"
     TRANS_SUB = "转录+字幕"
+    TRANS_SPLIT = "转录+断句"
     FULL_PROCESS = "全流程处理"
 
     def __str__(self):

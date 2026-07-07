@@ -160,9 +160,10 @@ def preprocess_segments(
     """
     new_segments = []
     for seg in segments:
+        seg.text = " ".join(seg.text.split())
         if not is_pure_punctuation(seg.text):
-            # 如果文本只包含字母、数字和撇号，则将其转换为小写并添加一个空格
-            if re.match(r"^[a-zA-Z0-9\']+$", seg.text.strip()):
+            # 英文词级时间戳可能自带首尾空格，清理后统一补一个拼接空格。
+            if re.search(r"[a-zA-Z0-9]", seg.text):
                 if need_lower:
                     seg.text = seg.text.lower() + " "
                 else:
