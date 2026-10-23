@@ -179,12 +179,12 @@ def choose_backend(adapters):
     names=[str(row.get('Name','')) for row in adapters]
     if any('nvidia' in name.lower() for name in names):return 'cuda'
     if any('9070' in name and ('radeon' in name.lower() or 'amd' in name.lower()) for name in names):return 'rocm-gfx120X'
-    raise RuntimeSetupError('未找到此版本支持自动配置的显卡。此版本不会自动回退 CPU。')
+    raise RuntimeSetupError('未找到支持的显卡，请选择 CPU 或配置兼容环境。')
 
 
 def detect_backend():
     if platform.system()!='Windows':
-        raise RuntimeSetupError('当前自动环境准备面向 Windows。此云端仅可预览界面和测试流程，不能安装 Windows GPU 环境。')
+        raise RuntimeSetupError('此 GPU 安装方案仅支持 Windows；请选择 CPU。')
     text=_command(['powershell','-NoProfile','-NonInteractive','-Command',
         'Get-CimInstance Win32_VideoController | Select-Object Name,PNPDeviceID,DriverVersion | ConvertTo-Json -Compress'],timeout=30)
     rows=json.loads(text.lstrip('\ufeff'))
@@ -208,7 +208,7 @@ def inspect_runtime(config=None, cancel=None):
         probe = _runtime_probe(engine, paths['repo_path'], (config or {}).get('device', 'gpu'))
         text = _command([paths['python_path'], '-c', probe], cancel=cancel, cwd=paths['repo_path'] if marker else None, timeout=90)
         info = json.loads(next(line[7:] for line in text.splitlines() if line.startswith('VC_GPU:')))
-        return result | info | dict(ready=True, message='在线语音环境可用' if engine == 'edge-tts' else ('CPU' if (config or {}).get('device') == 'cpu' else 'GPU') + ' 与引擎依赖检查通过，模型推理待实测')
+        return result | info | dict(ready=True, message='在线语音环境可用' if engine == 'edge-tts' else ('CPU' if (config or {}).get('device') == 'cpu' else 'GPU') + ' 环境检查通过')
     except Exception as error:
         _check(cancel)
         return result | dict(message=str(error))
@@ -359,6 +359,33 @@ def _engine_dependencies(engine):
     raise RuntimeSetupError('未知配音引擎')
 
 
+def _check_python_recipe(engine, backend, version):
+    """Install-recipe compatibility, not a claim of tested model inference.
+
+    Edge's pinned dependencies resolve on cp313. Qwen/dots use cp313-capable
+    torch 2.8 wheels; Index/GPT pin NumPy 1.26, Cosy pins older compiled wheels.
+    AMD's Windows recipe explicitly uses cp312-only torch/torchaudio URLs.
+    """
+    if getattr(sys, 'frozen', False):
+        raise RuntimeSetupError('请配置独立运行环境，或使用 Python 启动项目。')
+    if backend.startswith('rocm'):
+        if version != (3, 12):
+            raise RuntimeSetupError('此 AMD 运行环境需要 Python 3.12，请使用该版本启动项目。')
+        return
+    supported = {
+        'edge-tts': ((3, 10), (3, 13)),
+        'qwen3': ((3, 10), (3, 13)),
+        'dots': ((3, 10), (3, 13)),
+        'indextts2': ((3, 10), (3, 12)),
+        'cosyvoice3': ((3, 10), (3, 12)),
+        'gpt-sovits': ((3, 10), (3, 12)),
+    }
+    low, high = supported[engine]
+    if not low <= version <= high:
+        raise RuntimeSetupError('%s 当前依赖需要 Python %s.%s–%s.%s，请使用兼容版本启动项目。' %
+                                (engine, *low, *high))
+
+
 def runtime_installed(config=None):
     """Fast read-only UI state; directories alone are not successful setup."""
     paths = _paths(config)
@@ -384,10 +411,8 @@ def prepare_runtime(progress, cancel, config=None):
         return
     backend = 'online' if engine == 'edge-tts' else 'cpu' if device == 'cpu' else detect_backend()
     _check(cancel)
-    required = (3, 12) if backend.startswith('rocm') else None
     version = tuple(sys.version_info[:2])
-    if getattr(sys, 'frozen', False) or (required and version != required) or not ((3, 10) <= version <= (3, 12)):
-        raise RuntimeSetupError('当前 Python %s.%s 不兼容此安装方案；请使用 Python %s 启动项目后重试。不会自动下载另一份 Python。' % (*version, '3.12（AMD ROCm 7.2.1）' if required else '3.10–3.12'))
+    _check_python_recipe(engine, backend, version)
     root = paths['repo_path'].parent
     runtime, source = root / 'runtime', paths['repo_path']
     receipt = root / '.videocaptioner-setup.json'
@@ -428,7 +453,7 @@ def prepare_runtime(progress, cancel, config=None):
         missing = [url for name, version, url in packages if installed.get(name.replace('_', '-')) != version]
         if missing: command(pip + missing, percent)
         else: progress(percent, '复用已安装并核对版本的 GPU 依赖')
-    progress(2, '复用当前 Python，在项目内准备隔离依赖（不下载解释器）')
+    progress(2, '正在准备运行环境')
     if not python.is_file():
         command([sys.executable, '-m', 'venv', str(runtime)], 2)
     # Verify venv isolation before any pip command (never target a global interpreter).
@@ -446,7 +471,7 @@ def prepare_runtime(progress, cancel, config=None):
     elif not project:
         source.mkdir(exist_ok=True)
     if marker and not (source / marker).is_file():
-        raise RuntimeSetupError('已下载源码缺少必要文件，已保留现场，请检查环境目录。')
+        raise RuntimeSetupError('引擎文件不完整，请检查环境目录。')
     if engine == 'cosyvoice3' and not state.get('matcha_ready'):
         _download_source('shivammehta25/Matcha-TTS', 'dd9105b34bf2be2230f4aa1e4769fb586a3c824e', stage, source / 'third_party' / 'Matcha-TTS', cancel)
         state['matcha_ready'] = True; save()
@@ -462,7 +487,7 @@ def prepare_runtime(progress, cancel, config=None):
         torch = ['torch==2.8.0', 'torchaudio==2.8.0']
         command(pip + ['--index-url', 'https://download.pytorch.org/whl/cu128', '--extra-index-url', 'https://pypi.org/simple'] + torch, 20)
     elif backend.startswith('rocm'):
-        progress(20, 'AMD 官方 Windows ROCm 7.2.1 / Python 3.12；需驱动 26.2.2，安装不会修改驱动')
+        progress(20, '正在安装 GPU 运行时')
         base = 'https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/'
         install_urls([(name, '7.2.1', base + name + '-7.2.1-py3-none-win_amd64.whl') for name in ('rocm_sdk_core', 'rocm_sdk_devel', 'rocm_sdk_libraries_custom')] + [('rocm', '7.2.1', base + 'rocm-7.2.1.tar.gz')], 20)
         versions = [('torch', '2.9.1'), ('torchaudio', '2.9.1'), ('torchvision', '0.24.1')]
@@ -477,7 +502,7 @@ def prepare_runtime(progress, cancel, config=None):
     if engine == 'indextts2' and backend.startswith('rocm'): _amd_compat(runtime, source)
     if engine == 'dots': _dots_windows_compat(source)
     if engine == 'gpt-sovits': _gpt_windows_compat(source)
-    progress(90, '检查运行时和引擎导入（不下载模型）')
+    progress(90, '正在检查运行环境')
     text = command([python, '-c', _runtime_probe(engine, source, device)], 90, cwd=source, timeout=90)
     info = json.loads(next(line[7:] for line in text.splitlines() if line.startswith('VC_GPU:')))
     if backend != 'online' and info['backend'] != ('rocm' if backend.startswith('rocm') else backend):
@@ -486,7 +511,7 @@ def prepare_runtime(progress, cancel, config=None):
     _check(cancel)
     (source / '.videocaptioner-source.json').write_text(json.dumps(dict(identity, archive_sha256=state.get('archive_sha256'), packages=installed.splitlines()), ensure_ascii=False), 'utf8')
     state['complete'] = True; save()
-    progress(100, '在线语音环境已准备' if engine == 'edge-tts' else ('CPU' if backend == 'cpu' else 'GPU') + ' 环境检查通过；模型推理需在本机实测')
+    progress(100, '在线语音环境已准备' if engine == 'edge-tts' else ('CPU' if backend == 'cpu' else 'GPU') + ' 环境检查通过')
 
 
 # The upstream infer_v2 accepts these flat auxiliary locations. No network is
@@ -588,43 +613,16 @@ def download_models(progress, cancel, config=None):
     model_id = (config or {}).get('model_id', 'indextts2')
     if MODELS[model_id]['engine'] == 'edge-tts':
         _check(cancel)
-        progress(100, 'Edge TTS 使用在线音色，无需下载模型')
+        progress(100, '无需下载模型')
         return
     root = _paths(config)['model_dir']
     root.mkdir(parents=True, exist_ok=True)
-    inventory = []
-    progress(0, '正在获取固定版本模型清单')
-    for repo, subfolder, selected in _model_repos(model_id):
-        _check(cancel)
-        revision = MODEL_REVISIONS[repo]
-        meta = _json_url('https://huggingface.co/api/models/' + repo + '/revision/' + revision + '?blobs=true')
-        if meta['sha'] != revision:
-            raise RuntimeSetupError('模型版本与固定清单不一致')
-        for row in meta['siblings']:
-            name = row['rfilename']
-            if selected is not None and name not in selected:
-                continue
-            if selected is None and (name.startswith('.') or name.endswith(('.png', '.jpg', '.mp4', '.md'))):
-                continue
-            # IndexTTS's optional emotion Qwen is deliberately disabled, no extra LLM.
-            if model_id == 'indextts2' and selected is None and name.startswith('qwen'):
-                continue
-            relative = 'semantic_codec_model.safetensors' if name == 'semantic_codec/model.safetensors' else name
-            relative = (Path(subfolder) / relative).as_posix()
-            destination = (root / relative).resolve()
-            if not destination.is_relative_to(root.resolve()):
-                raise RuntimeSetupError('模型清单包含非法路径')
-            lfs = row.get('lfs') or {}
-            size = row.get('size', lfs.get('size'))
-            sha256, blob_id = lfs.get('sha256'), row.get('blobId')
-            if not isinstance(size, int) or size < 0 or not (sha256 or blob_id):
-                raise RuntimeSetupError('模型清单缺少文件身份：' + name)
-            inventory.append(dict(repo=repo, revision=revision, name=name, relative=relative,
-                                  sha256=sha256, blob_id=blob_id, size=size))
-        if selected is not None and not selected.issubset({row['rfilename'] for row in meta['siblings']}):
-            raise RuntimeSetupError('必要模型文件不存在：' + repo)
-    if not _required_files(model_id).issubset({row['relative'] for row in inventory}):
-        raise RuntimeSetupError('模型下载清单不完整')
+    from app.core.tts_model_metadata import build_model_inventory
+    progress(0, '正在获取模型信息')
+    inventory = build_model_inventory(model_id, cancel=cancel)
+    for row in inventory:
+        if not (root / row['relative']).resolve().is_relative_to(root.resolve()):
+            raise RuntimeSetupError('模型目录包含非法路径')
     missing = [row for row in inventory if not _file_matches(root / row['relative'], row, cancel)]
     total = sum(row['size'] for row in missing)
     if total and shutil.disk_usage(root).free < total:
@@ -708,8 +706,8 @@ def _verify_auxiliary(source, rows, cancel=None, full=True):
 
 
 def _prepare_gpt_assets(source, cancel, progress):
-    if not (source / 'GPT_SoVITS').is_dir():
-        raise RuntimeSetupError('请先安装 GPT-SoVITS 运行环境，再下载附属模型。')
+    # Model resources can precede engine installation; source merge preserves them.
+    (source / 'GPT_SoVITS').mkdir(parents=True, exist_ok=True)
     progress(96, '正在准备 GPT-SoVITS 文本前端资源')
     archive = source / '.assets' / 'G2PWModel.zip'
     expected = '46292be0374a49308069233cd5c147ae4c41806558e4781a2467a31a4d8099da'

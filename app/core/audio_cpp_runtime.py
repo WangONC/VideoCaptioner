@@ -128,13 +128,13 @@ def inspect_runtime(config=None, cancel=None):
         check(cancel)
         if (config or {}).get('device', 'gpu') == 'cpu':
             command([paths['python_path'], '--help'], cancel=cancel, cwd=paths['repo_path'], timeout=45)
-            result.update(ready=True, device='cpu', message='audio.cpp CLI 检查通过，已明确选择 CPU（模型推理待实测）')
+            result.update(ready=True, device='cpu', message='CPU 环境检查通过')
         else:
             devices = command([paths['python_path'], '--list-devices'], cancel=cancel, cwd=paths['repo_path'], timeout=45)
             vulkan = [line for line in devices.splitlines() if re.match(r'^vulkan:\d+\s', line, re.I)]
             if not vulkan:
-                raise Error('未检测到 Vulkan 设备，请检查显卡驱动；不会自动回退 CPU')
-            result.update(ready=True, device=vulkan[0], message='audio.cpp Vulkan 设备可用（模型推理待实测）')
+                raise Error('未检测到 Vulkan 设备，请检查显卡驱动或选择 CPU')
+            result.update(ready=True, device=vulkan[0], message='GPU 环境检查通过')
         result['models_ready'] = models_ready(config, cancel)
     except Exception as error:
         # Cancellation must stop callers, not become a successful check result.

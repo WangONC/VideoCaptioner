@@ -150,7 +150,34 @@ class SetupButtonsTests(unittest.TestCase):
         self.assertEqual(concise_status('Collecting torch==2.8.0'), '正在安装依赖')
         self.assertEqual(concise_status('下载 model.bin 10 / 20 MB'), '下载 model.bin 10 / 20 MB')
 
-    def test_unknown_size_is_explicit(self):
-        self.assertEqual(self.page.model_download_size('dots-mf'), '未知')
+    def test_pinned_sizes_available_before_download(self):
+        self.assertEqual(self.page.model_download_size('dots-mf'), '5.17 GB')
+        self.assertEqual(self.page.model_download_size('qwen3-design'), '9.06 GB')
+        self.assertEqual(self.page.model_download_size('gpt-sovits'), '1.83 GB')
+
+    def test_metadata_refresh_runs_off_gui_thread(self):
+        import threading
+        from app.core.tts_catalog import MODELS
+        calls, completed = [], threading.Event()
+        def fetch(model_id):
+            calls.append((model_id, threading.current_thread()))
+            if len(calls) == len(MODELS) - 1:
+                completed.set()
+            return 1
+        with patch('app.core.tts_model_metadata.fetch_model_bytes', side_effect=fetch):
+            self.page.refresh_model_sizes()
+            self.assertTrue(completed.wait(3))
+            self.page.refresh_model_sizes()
+        self.assertEqual(len(calls), len(MODELS) - 1)
+        self.assertTrue(all(thread is not threading.main_thread() for _, thread in calls))
+
+    def test_no_repair_explanations_in_visible_copy(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ('app/view/dubbing_interface.py', 'app/core/tts_runtime.py',
+                     'app/core/audio_cpp_runtime.py', 'app/components/dubbing_model_dialog.py'):
+            source = (root / name).read_text('utf8')
+            for forbidden in ('不会自动下载另一份', '不下载解释器', '模型推理待实测', '模型推理需在本机实测', '此云端仅可预览'):
+                self.assertNotIn(forbidden, source)
+
 
 if __name__ == '__main__': unittest.main()

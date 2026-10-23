@@ -47,7 +47,7 @@ class DubbingEnvironmentDialog(MessageBoxBase):
         self.device_combo.setCurrentIndex(self.device_combo.findData(page.device_for_model(model_id)))
         self.device_combo.currentIndexChanged.connect(self.device_changed)
         self.device_combo.setVisible(model_id != 'edge-tts')
-        self.device_combo.setToolTip('明确选择运行设备；GPU 失败不会自动回退 CPU')
+        self.device_combo.setToolTip('选择运行设备')
         self.program_download_btn = PushButton('下载环境', self)
         self.program_download_btn.clicked.connect(self.start_operation)
         controls.addWidget(self.program_combo)
@@ -131,6 +131,7 @@ class DubbingModelDialog(WhisperCppDownloadDialog):
         super().__init__(parent, setting_widget=page)
         self.widget.setMinimumWidth(740)
         self.page.setup_finished.connect(self.operation_finished)
+        self.page.model_size_updated.connect(self.refresh_model_size)
 
     def _setup_ui(self):
         layout = QVBoxLayout()
@@ -189,6 +190,12 @@ class DubbingModelDialog(WhisperCppDownloadDialog):
             env_layout.addStretch()
             self.model_table.setCellWidget(row, 4, environment)
         self._set_all_download_buttons_enabled(self.page.job is None)
+
+    def refresh_model_size(self, model_id):
+        row = list(MODELS).index(model_id)
+        item = self.model_table.item(row, 1)
+        if item is not None:
+            item.setText(self.page.model_download_size(model_id))
 
     def _open_model_folder(self):
         row = self.model_table.currentRow()

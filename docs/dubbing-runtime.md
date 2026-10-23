@@ -38,3 +38,20 @@
 AMD RX 9070 / 9070 XT Windows 路径采用官方 ROCm 7.2.1、Python 3.12、PyTorch/torchaudio 2.9.1 配方，要求驱动 26.2.2；程序不安装驱动。安装检查与实际 worker 都枚举设备并执行所选设备的张量检查，诊断包含索引、架构、Torch/HIP、可获取的驱动信息。此基础检查不是所有配音模型的兼容认证，不能据此认定 `hipErrorInvalidImage` 已解决。
 
 环境导入、CPU 张量、模拟设备测试、真实模型推理及 Windows GPU 测试是不同层次；未进行的实测不得标为通过。audio.cpp 当前自动安装包为 Windows 版本，不能把它当作 Linux CPU 安装包。
+
+## Python 安装配方边界
+
+| 配方 | 启动项目的 Python |
+| --- | --- |
+| Edge TTS | 3.10–3.13 |
+| Qwen3 / dots.tts，CPU 或 CUDA | 3.10–3.13 |
+| IndexTTS2 / GPT-SoVITS / CosyVoice3 | 3.10–3.12 |
+| Windows AMD ROCm 7.2.1 | 3.12 |
+
+2026-10-23 按固定依赖执行 Windows x86_64 / CPython 3.13 目标环境解析：Edge 19 包、Qwen3 CPU/CUDA 各 61 包、dots CPU/CUDA 各 63 包通过，包含实际 setuptools、wheel、torch/torchaudio 固定版本及 Windows/Python 条件依赖。此结果是依赖可解析证据，不是 Windows 安装或模型推理认证；安装后仍执行独立环境探测。Index/GPT 的 NumPy 1.26.4、Cosy 的旧版二进制依赖未提供 cp313 轮子；AMD 配方的下载地址明确为 cp312，因此没有统一取消版本限制。
+
+## 模型大小与字幕
+
+模型大小是固定完整下载清单总字节，不是剩余下载量或解压后的磁盘占用。包含 Index 辅助模型、VoiceDesign 的 Base、GPT 文本前端资源；目录不必已有模型。页面先读固定清单快照/版本绑定缓存，网络元数据只在后台刷新。下载器和显示共用文件清单规则。
+
+单个及批量配音复用 `SupportedSubtitleFormats` 与 `ASRData`，支持 SRT、ASS、VTT。队列保存规范化字幕快照，原文件不改；ASS 展示样式不进入配音快照，合成沿用既有样式。严格解析保留多行文本并拒绝损坏、倒序、重叠条目。非零 HLS `X-TIMESTAMP-MAP` 缺少可确定的视频时基时明确拒绝，不静默移动时间；需提供与视频一致的完整字幕。用户尚未提供的 TED VTT 不视为已验证。

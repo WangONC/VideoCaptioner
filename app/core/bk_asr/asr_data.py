@@ -487,11 +487,12 @@ class ASRData:
         return self.to_txt()
 
     @staticmethod
-    def from_subtitle_file(file_path: str) -> "ASRData":
+    def from_subtitle_file(file_path: str, strict: bool = False) -> "ASRData":
         """从文件路径加载ASRData实例
 
         Args:
             file_path: 字幕文件路径，支持.srt、.vtt、.ass、.json格式
+            strict: 严格读取 SRT/ASS/VTT，保留多行文本并拒绝损坏条目
 
         Returns:
             ASRData: 解析后的ASRData实例
@@ -509,6 +510,14 @@ class ASRData:
             content = file_path.read_text(encoding="gbk")
 
         suffix = file_path.suffix.lower()
+
+        if strict:
+            from .subtitle_parser import read_cues
+            if suffix not in (".srt", ".ass", ".vtt"):
+                raise ValueError(f"不支持的文件格式: {suffix}")
+            segments = [ASRDataSeg(text, start, end)
+                        for start, end, text in read_cues(content, suffix)]
+            return ASRData(segments)
 
         if suffix == ".srt":
             return ASRData.from_srt(content)
@@ -616,7 +625,7 @@ class ASRData:
         """
         segments = []
         # 跳过头部元数据
-        content = vtt_str.split("\n\n")[2:]
+        content = re.split(r"\n[ \t]*\n", vtt_str.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n"))
 
         timestamp_pattern = re.compile(
             r"(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})"
@@ -627,7 +636,7 @@ class ASRData:
 
         for block in content:
             lines = block.strip().split("\n")
-            if len(lines) < 2:
+            if len(lines) < 2 or re.match(r"^(WEBVTT|NOTE|STYLE|REGION)(?:[ \t]|$)", lines[0]):
                 continue
 
             # 解析时间戳行

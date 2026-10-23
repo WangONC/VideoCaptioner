@@ -1,4 +1,5 @@
 from pathlib import Path
+from app.core.dubbing.subtitles import subtitle_file_filter
 from PyQt5.QtWidgets import QHBoxLayout, QFileDialog
 from qfluentwidgets import MessageBoxBase, SubtitleLabel, BodyLabel, LineEdit, PushButton
 
@@ -8,7 +9,7 @@ class DubbingAssociationDialog(MessageBoxBase):
         self.generated_subtitles = generated_subtitles
         self.widget.setMinimumWidth(640)
         self.viewLayout.addWidget(SubtitleLabel(Path(video).name, self))
-        self.subtitle = self.file_row('字幕', value.get('subtitle', ''), 'SRT 字幕 (*.srt)')
+        self.subtitle = self.file_row('字幕', value.get('subtitle', ''), subtitle_file_filter())
         self.subtitle.setPlaceholderText('流程生成字幕' if generated_subtitles else '选择对应字幕')
         self.reference = self.file_row('参考声音', value.get('reference', ''), '音频 (*.wav *.mp3 *.flac *.m4a)')
         self.reference.setPlaceholderText('使用配音设置')

@@ -8,6 +8,7 @@ It assumes a single speaker. Review the extracted reference before voice cloning
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import html
 import json
 import math
 import os
@@ -60,7 +61,7 @@ def parse_srt(text, language="中文"):
             raise DubbingError('Invalid subtitle timestamp line')
         start, end = seconds(match.groups()[:4]), seconds(match.groups()[4:])
         original = '\n'.join(lines[2:])
-        clean = [re.sub(r'<[^>]+>|\{\\[^}]+\}', '', line).strip() for line in lines[2:]]
+        clean = [html.unescape(re.sub(r'<[^>]+>|\{\\[^}]+\}', '', line)).strip() for line in lines[2:]]
         japanese_or_korean = r'[\u3040-\u30ff\uac00-\ud7af]'
         chinese = [line for line in clean if re.search(r'[\u3400-\u9fff]', line)
                    and not re.search(japanese_or_korean, line)]
@@ -222,7 +223,8 @@ class DubbingPipeline:
                 raise DubbingError('Audio output must be WAV')
         elif output.suffix.lower() not in ('.mp4', '.mkv', '.mov'):
             raise DubbingError('Output must be MP4, MKV or MOV')
-        cues = parse_srt(source.read_text(encoding='utf-8-sig'), c.language)
+        from .subtitles import normalized_subtitles
+        cues = parse_srt(normalized_subtitles(source), c.language)
         cache = Path(c.cache_dir).expanduser().resolve(); cache.mkdir(parents=True, exist_ok=True)
         output.parent.mkdir(parents=True, exist_ok=True)
         _check(cancel_event)

@@ -96,7 +96,8 @@ def build_request(video, subtitle, output, settings, *, runtime=None, associatio
     video, subtitle = Path(video).expanduser().resolve(), Path(subtitle).expanduser().resolve()
     if not video.is_file() or not subtitle.is_file():
         raise DubbingError('视频或字幕文件不存在')
-    text = subtitle.read_text('utf-8-sig')
+    from .subtitles import normalized_subtitles
+    text = normalized_subtitles(subtitle)
     parse_srt(text, value['language'])
     mode = output_mode or ('audio' if value['output'] == '配音音频' else 'video')
     output = Path(output or next_output(video, mode)).expanduser().resolve()

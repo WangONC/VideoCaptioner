@@ -51,7 +51,7 @@ class DubbingJob(QThread):
                     ready = tts_runtime.verify_models(self.config['model_dir'], self.config['model_id'],
                         cancel=self.cancel_event, full=True, repo_path=self.config['repo_path'])
                 if not ready:
-                    raise RuntimeError('模型文件缺失或校验失败；请重新下载模型，检查不会自动下载或安装环境')
+                    raise RuntimeError('模型文件缺失或校验失败，请重新下载')
                 result = '模型文件校验通过'
             else:
                 function = tts_runtime.prepare_runtime if self.operation == 'runtime' else tts_runtime.download_models
@@ -66,6 +66,7 @@ class DubbingJob(QThread):
 class DubbingInterface(QWidget):
     finished = pyqtSignal(str)
     setup_finished = pyqtSignal()
+    model_size_updated = pyqtSignal(str)
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('DubbingInterface')
@@ -73,6 +74,7 @@ class DubbingInterface(QWidget):
         self.job = None
         self.last_output = None
         self.environment_checks = {}
+        self._model_size_refresh_started = False
         self.model_id = "indextts2"
         from app.core.dubbing.execution import backend_choices, device_choices
         self.backend_choices = backend_choices
@@ -181,7 +183,7 @@ class DubbingInterface(QWidget):
         fields.setContentsMargins(20,20,20,20)
         fields.setSpacing(15)
         self.subtitle_input = self.file_row(fields, '字幕文件', '选择或拖入中文字幕', self.choose_subtitle)
-        self.subtitle_input.setToolTip('按输出语言选择 SRT 中对应的文本行，原字幕不改动。')
+        self.subtitle_input.setToolTip('选择配音字幕')
         self.output_input = self.file_row(fields, '输出文件', '选择保存位置', self.choose_output)
         layout.addWidget(inputs)
 
@@ -240,7 +242,8 @@ class DubbingInterface(QWidget):
         self.output_input.setText(next_output(path, mode))
 
     def choose_subtitle(self):
-        path, _ = QFileDialog.getOpenFileName(self, '选择中文字幕', '', 'SRT 字幕 (*.srt)')
+        from app.core.dubbing.subtitles import subtitle_file_filter
+        path, _ = QFileDialog.getOpenFileName(self, '选择中文字幕', '', subtitle_file_filter())
         if path: self.subtitle_input.setText(path)
 
     def choose_output(self):
@@ -351,14 +354,31 @@ class DubbingInterface(QWidget):
             return f'{total / 1e9:.2f} GB'
         if model_id == 'edge-tts':
             return '无需模型'
-        try:
-            manifest = json.loads((Path(self.paths_for_model(model_id)['model_dir']) / 'videocaptioner-models.json').read_text('utf8'))
-            if manifest.get('model_id') == model_id and manifest.get('files'):
-                total = sum(int(row['size']) for row in manifest['files'])
-                return f'{total / 1e9:.2f} GB'
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
-        return '未知'
+        from app.core.tts_model_metadata import get_cached_model_bytes, format_model_size
+        total = get_cached_model_bytes(model_id)
+        return format_model_size(total) if total is not None else '获取中'
+
+    def refresh_model_sizes(self):
+        if self._model_size_refresh_started:
+            return
+        self._model_size_refresh_started = True
+        # Metadata is independent of model installation; never block Qt's UI thread.
+        # Daemon workers cannot keep the application alive or destroy a running QThread.
+        def refresh():
+            from app.core.tts_model_metadata import fetch_model_bytes
+            from app.core.utils.logger import setup_logger
+            for model_id in MODELS:
+                if model_id == 'edge-tts':
+                    continue
+                try:
+                    fetch_model_bytes(model_id)
+                except Exception as error:
+                    setup_logger('dubbing').warning('Model size metadata %s: %s', model_id, error)
+                try:
+                    self.model_size_updated.emit(model_id)
+                except RuntimeError:
+                    return  # Qt page has been destroyed during shutdown.
+        threading.Thread(target=refresh, name='dubbing-model-metadata', daemon=True).start()
 
     def edit_runtime(self):
         if self.model_id not in MODELS:
@@ -383,6 +403,7 @@ class DubbingInterface(QWidget):
         from app.components.dubbing_model_dialog import DubbingModelDialog
         self.model_dialog=DubbingModelDialog(self.window(),self)
         self.model_dialog.show()
+        self.refresh_model_sizes()
 
     def start_setup(self, operation, model_id=None):
         target=model_id or self.model_id
@@ -496,7 +517,8 @@ class DubbingInterface(QWidget):
         if self.job is not None:return
         for url in event.mimeData().urls():
             path=url.toLocalFile()
-            if path.lower().endswith('.srt'):self.subtitle_input.setText(path)
+            from app.core.entities import SupportedSubtitleFormats
+            if Path(path).suffix.lower().lstrip('.') in {f.value for f in SupportedSubtitleFormats}:self.subtitle_input.setText(path)
             elif Path(path).suffix.lower() in ('.mp4','.mkv','.mov','.avi','.webm','.m4v'):self.set_video(path)
         event.acceptProposedAction()
 
