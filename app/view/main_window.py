@@ -46,7 +46,8 @@ class MainWindow(FluentWindow):
         self.versionThread = QThread()
         self.versionManager.moveToThread(self.versionThread)
         self.versionThread.started.connect(self.versionManager.performCheck)
-        self.versionThread.start()
+        if os.environ.get("VIDEOCAPTIONER_DISABLE_UPDATE_CHECK") != "1":
+            self.versionThread.start()
 
         # 初始化导航界面
         self.initNavigation()
@@ -156,6 +157,12 @@ class MainWindow(FluentWindow):
             self.splashScreen.resize(self.size())
 
     def closeEvent(self, event):
+        # Do not destroy a live QThread or abandon a partially written audio/video.
+        dubbing = self.homeInterface.dubbing_interface
+        if dubbing.job is not None:
+            dubbing.cancel_job()
+            event.ignore()
+            return
         # 关闭所有子界面
         # self.homeInterface.close()
         # self.batchProcessInterface.close()

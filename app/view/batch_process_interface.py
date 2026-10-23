@@ -48,6 +48,10 @@ class BatchProcessInterface(QWidget):
         self.setAcceptDrops(True)
         self.batch_thread = BatchProcessThread()
 
+        from app.core.dubbing.settings import shared_settings
+        self.dubbing_settings = shared_settings.value()
+        shared_settings.changed.connect(self.apply_shared_settings)
+        self.dubbing_associations = {}
         self.init_ui()
         self.setup_connections()
 
@@ -117,6 +121,7 @@ class BatchProcessInterface(QWidget):
         self.start_all_btn.clicked.connect(self.start_all_tasks)
         self.clear_btn.clicked.connect(self.clear_tasks)
         self.task_type_combo.currentTextChanged.connect(self.on_task_type_changed)
+        self.update_dubbing_controls()
 
     def setup_connections(self):
         # 批处理线程信号连接
@@ -146,7 +151,7 @@ class BatchProcessInterface(QWidget):
             # 获取所有支持的字幕格式
             subtitle_formats = [f"*.{fmt.value}" for fmt in SupportedSubtitleFormats]
             file_filter = f"字幕文件 ({' '.join(subtitle_formats)})"
-        elif task_type == BatchTaskType.SYNTHESIS:
+        elif task_type in (BatchTaskType.SYNTHESIS, BatchTaskType.DUBBING, BatchTaskType.DUBBING_SYNTHESIS):
             # 视频合成任务
             video_formats = [f"*.{fmt.value}" for fmt in SupportedVideoFormats]
             file_filter = f"视频文件 ({' '.join(video_formats)})"
@@ -283,7 +288,7 @@ class BatchProcessInterface(QWidget):
             }
         elif task_type == BatchTaskType.SUBTITLE:
             valid_extensions = {f".{fmt.value}" for fmt in SupportedSubtitleFormats}
-        elif task_type == BatchTaskType.SYNTHESIS:
+        elif task_type in (BatchTaskType.SYNTHESIS, BatchTaskType.DUBBING, BatchTaskType.DUBBING_SYNTHESIS):
             valid_extensions = {f".{fmt.value}" for fmt in SupportedVideoFormats}
 
         return [
@@ -298,6 +303,9 @@ class BatchProcessInterface(QWidget):
 
         # 文件名
         file_name = QTableWidgetItem(os.path.basename(file_path))
+        if self.dubbing_requested():
+            subtitle = "流程生成字幕" if self.task_type_combo.currentText() == str(BatchTaskType.FULL_PROCESS) else "未选择字幕"
+            file_name.setText(f"{os.path.basename(file_path)}  /  {subtitle}  /  使用配音设置")
         file_name.setToolTip(file_path)
         self.task_table.setItem(row, 0, file_name)
 
@@ -350,6 +358,12 @@ class BatchProcessInterface(QWidget):
             FIF.PLAY,
             "重新开始" if self.is_task_failed(status) else "开始",
         )
+        if self.dubbing_requested():
+            start_action.setText("暂不可用")
+            start_action.setEnabled(False)
+            association = Action(FIF.EDIT, "字幕与参考声音")
+            association.triggered.connect(lambda: self.edit_dubbing_association(file_path))
+            menu.addAction(association)
         start_action.triggered.connect(lambda: self.start_task(file_path))
         menu.addAction(start_action)
 
@@ -414,6 +428,8 @@ class BatchProcessInterface(QWidget):
                 break
 
     def start_all_tasks(self):
+        if self.dubbing_requested():
+            return
         # 检查是否有任务
         if self.task_table.rowCount() == 0:
             InfoBar.warning(
@@ -460,6 +476,8 @@ class BatchProcessInterface(QWidget):
                 self.batch_thread.add_task(batch_task)
 
     def start_task(self, file_path: str):
+        if self.dubbing_requested():
+            return
         target_row = -1
         for row in range(self.task_table.rowCount()):
             if self.task_table.item(row, 0).toolTip() == file_path:
@@ -497,6 +515,7 @@ class BatchProcessInterface(QWidget):
         self.batch_thread.add_task(batch_task)
 
     def cancel_task(self, file_path: str):
+        self.dubbing_associations.pop(file_path, None)
         self.batch_thread.stop_task(file_path)
         # 从表格中移除任务
         for row in range(self.task_table.rowCount()):
@@ -507,10 +526,12 @@ class BatchProcessInterface(QWidget):
     def clear_tasks(self):
         self.batch_thread.stop_all()
         self.task_table.setRowCount(0)
+        self.dubbing_associations.clear()
 
     def on_task_type_changed(self, task_type):
         # 清空当前任务列表
         self.clear_tasks()
+        self.update_dubbing_controls()
 
     def closeEvent(self, event):
         self.batch_thread.stop_all()
@@ -520,4 +541,34 @@ class BatchProcessInterface(QWidget):
         """处理表格双击事件"""
         row = index.row()
         file_path = self.task_table.item(row, 0).toolTip()
-        self.open_output_folder(file_path)
+        if self.dubbing_requested():
+            self.edit_dubbing_association(file_path)
+        else:
+            self.open_output_folder(file_path)
+
+    def dubbing_requested(self):
+        kind = BatchTaskType(self.task_type_combo.currentText())
+        return kind in (BatchTaskType.DUBBING, BatchTaskType.DUBBING_SYNTHESIS)
+
+    def update_dubbing_controls(self):
+        requested = self.dubbing_requested()
+        self.start_all_btn.setEnabled(not requested)
+        self.start_all_btn.setText('暂不可用' if requested else '开始处理')
+        self.task_table.setHorizontalHeaderLabels(['视频 / 字幕 / 参考声音' if requested else '文件名', '进度', '状态'])
+
+    def edit_dubbing_association(self, file_path):
+        from app.components.dubbing_batch_dialog import DubbingAssociationDialog
+        dialog = DubbingAssociationDialog(file_path, self.dubbing_associations.get(file_path, {}), self.window(),
+            generated_subtitles=self.task_type_combo.currentText() == str(BatchTaskType.FULL_PROCESS))
+        if dialog.exec_():
+            self.dubbing_associations[file_path] = dialog.value()
+            value = dialog.value()
+            for row in range(self.task_table.rowCount()):
+                item = self.task_table.item(row, 0)
+                if item.toolTip() == file_path:
+                    subtitle = os.path.basename(value['subtitle']) if value['subtitle'] else ('流程生成字幕' if dialog.generated_subtitles else '未选择字幕')
+                    reference = os.path.basename(value['reference']) if value['reference'] else '使用配音设置'
+                    item.setText(f'{os.path.basename(file_path)}  /  {subtitle}  /  {reference}')
+
+    def apply_shared_settings(self, value):
+        self.dubbing_settings = dict(value)

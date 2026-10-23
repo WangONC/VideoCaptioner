@@ -94,6 +94,8 @@ class BatchProcessThread(QThread):
                 self._handle_full_process_task(batch_task)
             elif batch_task.task_type == BatchTaskType.SYNTHESIS:
                 self._handle_synthesis_task(batch_task)
+            elif batch_task.task_type in (BatchTaskType.DUBBING, BatchTaskType.DUBBING_SYNTHESIS):
+                raise ValueError("暂不可用")
 
         except Exception as e:
             logger.exception(f"处理任务失败: {str(e)}")

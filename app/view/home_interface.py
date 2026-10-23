@@ -7,6 +7,7 @@ from app.view.subtitle_interface import SubtitleInterface
 from app.view.task_creation_interface import TaskCreationInterface
 from app.view.transcription_interface import TranscriptionInterface
 from app.view.video_synthesis_interface import VideoSynthesisInterface
+from app.view.dubbing_interface import DubbingInterface
 
 
 class HomeInterface(QWidget):
@@ -34,6 +35,7 @@ class HomeInterface(QWidget):
         self.transcription_interface = TranscriptionInterface(self)
         self.subtitle_optimization_interface = SubtitleInterface(self)
         self.video_synthesis_interface = VideoSynthesisInterface(self)
+        self.dubbing_interface = DubbingInterface(self)
 
         self.addSubInterface(
             self.task_creation_interface, "TaskCreationInterface", self.tr("任务创建")
@@ -46,6 +48,7 @@ class HomeInterface(QWidget):
             "SubtitleInterface",
             self.tr("字幕优化与翻译"),
         )
+        self.addSubInterface(self.dubbing_interface, "DubbingInterface", self.tr("视频配音"))
         self.addSubInterface(
             self.video_synthesis_interface,
             "VideoSynthesisInterface",
@@ -89,6 +92,8 @@ class HomeInterface(QWidget):
         self.pivot.setCurrentItem("SubtitleInterface")
 
     def switch_to_video_synthesis(self, video_path, subtitle_path):
+        # Preserve the existing automatic subtitle synthesis flow. Dubbing is opt-in.
+        self.dubbing_interface.set_inputs(video_path, subtitle_path)
         # 切换到视频合成界面
         synthesis_task = TaskFactory.create_synthesis_task(
             video_path, subtitle_path, need_next_task=True
@@ -120,4 +125,5 @@ class HomeInterface(QWidget):
         self.transcription_interface.close()
         self.subtitle_optimization_interface.close()
         self.video_synthesis_interface.close()
+        self.dubbing_interface.close()
         super().closeEvent(event)

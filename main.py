@@ -18,7 +18,8 @@ sys.path.append(project_root)
 plugin_path = os.path.join(
     sys.prefix, "Lib", "site-packages", "PyQt5", "Qt5", "plugins"
 )
-os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = plugin_path
+if sys.platform == "win32":
+    os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = plugin_path
 
 # Delete pyd files app*.pyd
 for file in os.listdir():
