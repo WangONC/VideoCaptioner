@@ -13,7 +13,7 @@ MODEL_OPTIONS = {
     'gpt-sovits': dict(name='GPT-SoVITS', sources=('原视频声音', '参考音频'), seed=True),
     'dots-soar': dict(name='dots.tts · SOAR', sources=('原视频声音', '参考音频'), seed=True),
     'dots-mf': dict(name='dots.tts · MF', sources=('原视频声音', '参考音频'), seed=True),
-    'edge-tts': dict(name='Edge TTS · 在线', sources=('预设音色',), voices=('zh-CN-XiaoxiaoNeural', 'zh-CN-YunxiNeural', 'en-US-JennyNeural')),
+    'edge-tts': dict(name='Edge TTS · 在线', sources=('预设音色',), voices=('zh-CN-XiaoxiaoNeural', 'zh-CN-YunxiNeural', 'en-US-JennyNeural', 'ja-JP-NanamiNeural', 'ko-KR-SunHiNeural')),
 }
 DEFAULT_SETTINGS = dict(model_id='indextts2', source='原视频声音', reference_source='原视频声音', reference_audio='', reference_text='', voice='', description='', language='中文', speed=1.0, style='', alignment='按字幕时间对齐', max_speedup=1.35, overflow='停止并提示', output='配音视频', original='替换原声', seed=-1)
 
@@ -34,18 +34,31 @@ def normalized(value):
 def validation_error(value):
     if value['source'] == '参考音频' and not Path(value['reference_audio']).is_file():
         return '请选择参考音频'
+    if value['model_id'] == 'gpt-sovits' and value['language'] == '韩语':
+        return 'GPT-SoVITS 当前 Windows 环境未接入韩语文本前端，请选择 Qwen3、dots 或 Edge'
+    if value['model_id'] == 'indextts2' and value['language'] not in ('中文', '英语'):
+        return 'IndexTTS2 当前适配仅支持中文和英语'
     if value['source'] == '声音描述' and not value['description'].strip():
         return '请输入声音描述'
     return ''
 
 def executable(value):
-    """Explicit allow-list for the already implemented pipeline, not model promises."""
+    """Implemented option validation; installation is checked by each provider."""
     from app.core.tts_catalog import MODELS
-    return (value['model_id'] in MODELS and value['source'] in ('原视频声音', '参考音频')
-            and value['language'] == '中文' and value['speed'] == 1.0
-            and not (value['style'].strip() if MODEL_OPTIONS[value['model_id']].get('style') else '') and value['alignment'] == '按字幕时间对齐'
-            and value['overflow'] == '停止并提示' and value['output'] == '配音视频'
-            and value['original'] == '替换原声' and (not MODEL_OPTIONS[value['model_id']].get('seed') or value['seed'] == -1))
+    import math
+    try:
+        spec = MODEL_OPTIONS[value['model_id']]
+        return (value['model_id'] in MODELS and value['source'] in spec['sources']
+                and value['language'] in ('中文', '英语', '日语', '韩语')
+                and math.isfinite(float(value['speed'])) and .5 <= float(value['speed']) <= 2.0
+                and math.isfinite(float(value['max_speedup'])) and 1 <= float(value['max_speedup']) <= 2
+                and value['alignment'] in ('按字幕时间对齐', '自然语速')
+                and value['overflow'] in ('停止并提示', '保留超限音频')
+                and value['output'] in ('配音视频', '配音音频')
+                and value['original'] in ('替换原声', '保留为独立音轨')
+                and -1 <= int(value['seed']) <= 2147483647)
+    except (KeyError, TypeError, ValueError):
+        return False
 
 class PresetStore:
     def __init__(self, path):

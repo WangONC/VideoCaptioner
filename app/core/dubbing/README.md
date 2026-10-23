@@ -1,70 +1,74 @@
-# Local dubbing core
+# 配音执行与环境
 
-This module imports without Qt, torch or IndexTTS installed. `DubbingPipeline.run`
-is blocking: call it from a background thread, pass a `threading.Event` for
-cancellation, and marshal progress callbacks back to the GUI thread.
+单个配音、批量配音和配音＋合成共用不可变 `DubbingRequest`、后台
+`DubbingThread` 和执行管线。入队时冻结配置、字幕正文和参考文件关联；
+后续修改页面不会改动已入队任务。原视频、字幕、参考文件和已有输出均不覆盖。
 
-```python
-from app.core.dubbing import DubbingConfig, DubbingPipeline
-config = DubbingConfig(
-    video_path='lesson.mp4', srt_path='lesson.zh.srt',
-    output_path='lesson.dubbed.mp4', cache_dir='dubbing-cache',
-    python_path='/path/to/indextts/.venv/bin/python',
-    repo_path='/path/to/indextts', model_dir='/path/to/checkpoints',
-)
-output_path = DubbingPipeline(config).run(
-    on_progress=lambda completed, total, message: print(message),
-    cancel_event=None,
-)
-```
+## 输入与输出
 
-## Boundaries and behaviour
+- 输入为视频和 SRT。按输出语言选择中、英、日、韩的对应文本行，不做翻译。
+  分行双语可用；混合脚本会排除明确的其他语言。纯汉字日语与中文无法可靠区分，
+  有歧义时应提供单语字幕。字幕时间必须有序、不重叠且位于视频内。
+- 克隆模型可从视频选取约 3–10 秒参考，或使用独立参考音频。
+  自动选择只依据字幕时段/文本，并非说话人识别、降噪或人声分离。
+  参考文本必须是参考声音的准确转写，不是目标翻译文本。
+- 预置音色、声音描述和 Edge 不提取或上传参考音频。
+- 单个输出由设置决定；批量配音输出 WAV；配音＋合成输出视频。
+  后者复用现有 `need_video` / `soft_subtitle` 的无字幕、软字幕、硬字幕选择。
+  目前只支持 SRT，硬字幕为 FFmpeg 默认样式，不支持 ASS 样式。
+- 数值语速由 FFmpeg 后处理，额外时间对齐加速受最大倍数限制。
+  默认超限停止；选择保留超限音频或自然语速时不截断语音，而是顺延后续句子。
+  此时原字幕时间不变，输出音轨可能长于视频；它不是自动字幕重排。
+- 默认替换原声，也可把原音保留为第二条非默认音轨；不进行背景音分离或混音。
+- 默认视频流直接复制；硬字幕需重新编码。音轨为单声道 24 kHz。
 
-- Only Chinese-bearing subtitle lines are voiced. Separate bilingual lines are
-  supported; the original subtitle file is never modified. Latin names embedded
-  in Chinese lines remain intact. English-only cues fail explicitly.
-- Timestamps must be ordered, positive-duration and non-overlapping. Invalid
-  cues are rejected rather than silently shifted.
-- Reference selection uses subtitle time spans and text heuristics, prefers
-  English-bearing spans near six seconds and allows adjacent short cues with
-  gaps up to 0.5 seconds. Chinese-only subtitles work too. **This does not detect
-  speaker identity, music, noise or actual speech.** It assumes one speaker;
-  review the source interval or supply a clean 3–10 second `reference_audio` WAV.
-  `reference_text` is metadata for cache identity, not required by IndexTTS2.
-- A dedicated Python subprocess loads IndexTTS2 once, then accepts sequential
-  requests. The application interpreter never imports torch. The subprocess
-  must have compatible dependencies and all required model/auxiliary assets.
-  It refuses network connections and missing assets fail locally. No model
-  downloads, package installation, external service or server is started.
-- NVIDIA CUDA and AMD ROCm both use PyTorch's CUDA API. This is runtime detection,
-  **not a promise that all AMD hardware or Windows AMD runtimes are supported**.
-  Missing GPU support fails explicitly; there is no CPU fallback. CUDA-specific
-  fused kernels and DeepSpeed are disabled. Actual GPU inference remains untested.
-- Raw per-cue PCM WAVs are cached atomically using source-video content,
-  reference content, selected Chinese text and model/source fingerprints.
-  Retry defaults to one additional attempt; partial WAVs are not reused.
-  Cancellation terminates the worker/process; successful cues remain reusable.
-- Audio longer than its subtitle slot is tempo-adjusted only up to
-  `max_speedup` (default 1.35). Larger mismatches stop with an actionable error.
-  Short audio is silence-padded, not stretched to fill the slot.
-- The final audio timeline is streamed to disk at mono 24 kHz. The video stream
-  is copied without re-encoding; duration is bounded to the source video.
-  **Original audio, music and ambience are replaced**, not source-separated or
-  mixed. The first video stream is retained; extra audio/subtitle tracks are not.
-  Output replacement is atomic and occurs only after successful muxing.
+## 引擎与后端
 
-## Verification
+Python 提供器在独立子进程运行，GUI 不导入 torch。各引擎环境隔离。
+适配器涵盖 IndexTTS2、Qwen3 Base / CustomVoice / VoiceDesign、dots.tts
+SOAR / MF、CosyVoice3、GPT-SoVITS v2 和 Edge TTS。
+IndexTTS2 当前语言适配范围为中文和英语；GPT-SoVITS 的 Windows 配方未接入韩语文本前端，会明确拒绝。其他模型按各自 API 能力验证。
+声音编辑不在本功能范围内。VoiceDesign 首次设计一段固定参考，再用配套 Base
+克隆后续句子；描述、语言及模型身份相同的任务复用该参考，不逐句重新设计。
+此模式额外下载 Base 权重；真实声纹稳定性仍需本地试听验收。
 
-`python -m unittest discover -s tests -p 'test_dubbing*.py' -v`
+`audio.cpp` 是另一套 CLI 与 GGUF 权重，不能直接使用 PyTorch 权重。
+它只出现在已适配的 IndexTTS2、Qwen3 和 dots 模型后端中，使用 Windows Vulkan。
+CosyVoice3、GPT-SoVITS、Edge 不会误提供该后端。
 
-Tests use synthetic tones and fake TTS implementations. They exercise real
-FFmpeg extraction/fitting/muxing, video-stream hash preservation, timeline
-silence/sound placement, duration, cache reuse/invalidation, corrupted-cache
-recovery, retry, cancellation/resume, GPU refusal and persistent JSON protocol.
-**Passing tests do not establish voice-cloning quality or real model compatibility.**
+Edge 是第三方 `edge-tts` 库访问 Edge 在线服务，不是本地模型或微软正式公共 API。
+仅发送合成文本和所选音色，不发送视频或参考音频；在线列表验证音色存在与语种。
+其 MP3 返回值会真实解码为 WAV。服务不可用时明确失败，不静默换音色。
 
-The worker's API calls were checked against the official IndexTTS2 source:
-https://github.com/index-tts/index-tts/blob/main/indextts/infer_v2.py
-and https://github.com/index-tts/index-tts#python-api . No upstream source was
-copied into this module. The host repository uses GPL-3.0; model licenses and
-runtime redistribution require their own review before distribution.
+## 安装、下载与安全边界
+
+环境/模型下载仅由用户点击管理模型内的操作启动。源码使用固定提交，
+模型使用固定仓库版本和文件身份；下载清单包含全部所需文件，校验通过才发布成功。
+不以 `config.json` 存在或进程 exit 0 代替完整检查。运行时不会偷偷下载缺失权重。
+下载取消后保留已完成且校验正确的文件，重试跳过有效文件。
+安装使用暂存目录，不覆盖外部已配置环境；失败提供实际诊断。
+
+Windows 自动安装根据检测结果选择 NVIDIA CUDA 或明确支持的 AMD gfx120X
+ROCm 候选。AMD 也通过 `torch.cuda` API 工作，但安装后需运行真实 GPU 张量操作
+及引擎导入检查。Vulkan 后端需枚举到可用设备。以上检查不等于模型推理验收，
+也不代表任意 AMD 显卡或驱动均可用；不自动回落 CPU。
+
+模型代码与权重许可证各自适用；仓库 GPL-3.0 不能代替上游模型的使用许可。
+固定来源和版本见 `tts_catalog.py` / `audio_cpp_runtime.py`。
+
+## 取消与缓存
+
+模型、环境变更和单个/批量执行共用可取消执行锁。取消停止独立工作进程；
+旧任务的迟到回调不能覆盖新任务状态。句级 PCM 缓存按源文件、声音参考、文本、
+模型和有效生成选项绑定；损坏缓存重建，失败或取消不发布最终输出。
+
+## 验证范围
+
+`QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -p 'test_*.py'`
+
+云端测试使用模拟 TTS、模拟上游 API、真实子进程和真实 FFmpeg，验证配置映射、
+下载校验、任务状态、取消、重试、音轨/字幕合成与输出保护。
+没有在云端下载并运行真实大模型，没有 GPU 性能或显存测试。
+测试通过不表示音色质量、Windows 所有依赖安装或真实 GPU 推理已经验收。
+
+本地应先用短视频和对应字幕验证一个模型，再测批量、取消重试和软/硬字幕。

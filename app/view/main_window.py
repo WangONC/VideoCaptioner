@@ -163,6 +163,7 @@ class MainWindow(FluentWindow):
             dubbing.cancel_job()
             event.ignore()
             return
+        self.batchProcessInterface.batch_thread.stop_all()
         # 关闭所有子界面
         # self.homeInterface.close()
         # self.batchProcessInterface.close()

@@ -25,13 +25,16 @@ logger = setup_logger("batch_process_thread")
 
 
 class BatchTask:
-    def __init__(self, file_path: str, task_type: BatchTaskType):
+    def __init__(self, file_path: str, task_type: BatchTaskType, dubbing_request=None):
         self.file_path = file_path
         self.task_type = task_type
         self.status = BatchTaskStatus.WAITING
         self.progress = 0
         self.error_message = ""
         self.current_thread: Optional[QThread] = None
+        self.dubbing_request = dubbing_request
+        self.cancelled = False
+        self.output_path = None
 
 
 class BatchProcessThread(QThread):
@@ -50,8 +53,11 @@ class BatchProcessThread(QThread):
         self.threads = []  # 保存所有创建的线程
 
     def add_task(self, task: BatchTask):
-        self.task_queue.put(task)
+        existing = self.current_tasks.get(task.file_path)
+        if existing and existing.status in (BatchTaskStatus.WAITING, BatchTaskStatus.RUNNING) and not existing.cancelled:
+            return False
         self.current_tasks[task.file_path] = task
+        self.task_queue.put(task)
         if not self.isRunning():
             self.is_running = True
             self.start()
@@ -61,15 +67,21 @@ class BatchProcessThread(QThread):
             # 检查是否有正在运行的任务数量是否达到上限
             running_tasks = sum(
                 1
-                for task in self.current_tasks.values()
+                for task in list(self.current_tasks.values())
                 if task.status == BatchTaskStatus.RUNNING
             )
 
+            # A cancelled task may be removed from the UI while its worker is
+            # still stopping FFmpeg/model processes. Do not overlap the next GPU job.
+            live_dubbing = sum(1 for thread in list(self.threads)
+                               if getattr(thread, 'operation', None) == 'dub' and thread.isRunning())
+            running_tasks = max(running_tasks, live_dubbing)
             if running_tasks < self.max_concurrent_tasks:
                 try:
                     # 非阻塞方式获取任务
                     task = self.task_queue.get_nowait()
-                    self._process_task(task)
+                    if not task.cancelled and self.current_tasks.get(task.file_path) is task:
+                        self._process_task(task)
                 except queue.Empty:
                     time.sleep(0.1)  # 避免CPU过度使用
             else:
@@ -95,7 +107,7 @@ class BatchProcessThread(QThread):
             elif batch_task.task_type == BatchTaskType.SYNTHESIS:
                 self._handle_synthesis_task(batch_task)
             elif batch_task.task_type in (BatchTaskType.DUBBING, BatchTaskType.DUBBING_SYNTHESIS):
-                raise ValueError("暂不可用")
+                self._handle_dubbing_task(batch_task)
 
         except Exception as e:
             logger.exception(f"处理任务失败: {str(e)}")
@@ -103,24 +115,56 @@ class BatchProcessThread(QThread):
             batch_task.error_message = str(e)
             self.task_error.emit(batch_task.file_path, str(e))
 
+    def _handle_dubbing_task(self, batch_task):
+        from app.thread.dubbing_thread import DubbingThread
+        if batch_task.dubbing_request is None:
+            raise ValueError("缺少配音任务配置，请选择字幕后重试")
+        thread = DubbingThread(batch_task.dubbing_request)
+        thread.moveToThread(self.thread())
+        batch_task.current_thread = thread
+        self.threads.append(thread)
+        thread.progress.connect(partial(self._on_progress_wrapper, batch_task), Qt.QueuedConnection)
+        thread.failed.connect(partial(self._on_error_wrapper, batch_task), Qt.QueuedConnection)
+        thread.cancelled.connect(partial(self._on_error_wrapper, batch_task, "已取消，完成的句子已缓存"), Qt.QueuedConnection)
+        thread.succeeded.connect(partial(self._on_dubbing_succeeded, batch_task), Qt.QueuedConnection)
+        thread.finished.connect(partial(self._release_thread, thread), Qt.QueuedConnection)
+        if batch_task.cancelled:
+            thread.stop()
+        thread.start()
+
+    def _release_thread(self, thread):
+        if thread in self.threads:
+            self.threads.remove(thread)
+        thread.deleteLater()
+
+    def _on_dubbing_succeeded(self, batch_task, output):
+        if batch_task.cancelled or self.current_tasks.get(batch_task.file_path) is not batch_task:
+            return
+        batch_task.output_path = output
+        self._on_finished_wrapper(batch_task)
+
     def _on_progress_wrapper(self, batch_task: BatchTask, progress: int, message: str):
         """进度信号包装器"""
-        if batch_task.status == BatchTaskStatus.FAILED:
+        if batch_task.cancelled or batch_task.status == BatchTaskStatus.FAILED or self.current_tasks.get(batch_task.file_path) is not batch_task:
             return
         self.task_progress.emit(batch_task.file_path, progress, message)
 
     def _on_error_wrapper(self, batch_task: BatchTask, error: str):
         """错误信号包装器"""
+        if batch_task.cancelled or self.current_tasks.get(batch_task.file_path) is not batch_task:
+            return
         batch_task.status = BatchTaskStatus.FAILED
         batch_task.error_message = error
         self.task_error.emit(batch_task.file_path, error)
 
     def _on_finished_wrapper(self, batch_task: BatchTask, task=None):
         """完成信号包装器"""
+        if batch_task.cancelled or batch_task.status == BatchTaskStatus.FAILED or self.current_tasks.get(batch_task.file_path) is not batch_task:
+            return
         batch_task.status = BatchTaskStatus.COMPLETED
         batch_task.progress = 100
         self.task_completed.emit(batch_task.file_path)
-        if batch_task.current_thread in self.threads:
+        if batch_task.dubbing_request is None and batch_task.current_thread in self.threads:
             self.threads.remove(batch_task.current_thread)
 
     def _handle_transcribe_task(self, batch_task: BatchTask):
@@ -443,25 +487,26 @@ class BatchProcessThread(QThread):
             self.task_progress.emit(batch_task.file_path, progress_value, message)
 
     def stop_task(self, file_path: str):
-        if file_path in self.current_tasks:
-            task = self.current_tasks[file_path]
-            if task.current_thread:
-                if hasattr(task.current_thread, "stop"):
-                    task.current_thread.stop()
-            del self.current_tasks[file_path]
-            # 从队列中移除任务
-            with self.task_queue.mutex:
-                self.task_queue.queue.clear()
+        task = self.current_tasks.pop(file_path, None)
+        if task:
+            task.cancelled = True
+            if task.current_thread and hasattr(task.current_thread, 'stop'):
+                task.current_thread.stop()
+        # Queued entries are skipped by identity/cancel checks; do not drop other tasks.
 
     def stop_all(self):
         self.is_running = False
-        # 停止所有线程
-        for thread in self.threads:
-            if hasattr(thread, "stop"):
+        for task in list(self.current_tasks.values()):
+            task.cancelled = True
+        # Stop queue dispatch before collecting workers, avoiding a late-start race.
+        if self.isRunning() and QThread.currentThread() is not self:
+            self.wait()
+        for thread in list(self.threads):
+            if hasattr(thread, 'stop'):
                 thread.stop()
-            thread.wait()  # 等待线程结束
+        for thread in list(self.threads):
+            thread.wait()
         self.threads.clear()
         self.current_tasks.clear()
-        # 清空任务队列
         with self.task_queue.mutex:
             self.task_queue.queue.clear()

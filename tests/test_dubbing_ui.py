@@ -54,7 +54,8 @@ class DubbingUiTests(unittest.TestCase):
         self.assertEqual(dialog.model_table.height(), original.model_table.height())
         self.assertEqual(dialog.model_table.verticalHeader().defaultSectionSize(), 45)
         self.assertEqual(dialog.model_table.columnCount(), 5)
-        self.assertEqual(dialog.model_table.rowCount(), 3)
+        from app.core.tts_catalog import MODELS
+        self.assertEqual(dialog.model_table.rowCount(), len(MODELS))
         for row in range(3):
             self.assertEqual(dialog.model_table.cellWidget(row, 4).findChild(HyperlinkButton).text(), '安装环境')
         self.assertFalse(any(b.text() == '高级设置' for b in dialog.findChildren(HyperlinkButton)))
@@ -71,22 +72,23 @@ class DubbingUiTests(unittest.TestCase):
             start.assert_called_once_with('runtime', 'qwen3-0.6b')
         self.assertEqual(self.page.model_id, 'indextts2')
 
-    def test_audiocpp_preview_has_no_download_side_effects(self):
+    def test_audiocpp_download_requires_explicit_click(self):
         dialog = DubbingEnvironmentDialog(self.host, self.page, 'qwen3-0.6b')
         dialog.program_combo.setCurrentIndex(dialog.program_combo.findData('audio.cpp'))
         self.assertEqual(self.page.backend_for_model('qwen3-0.6b'), 'audio.cpp')
-        self.assertFalse(dialog.program_download_btn.isEnabled())
-        self.assertEqual(dialog.status_label.text(), '暂不可用')
+        self.assertTrue(dialog.program_download_btn.isEnabled())
+        self.assertIn('尚未下载', dialog.status_label.text())
         self.assertEqual(dialog.program_combo.toolTip(), '选择推理后端')
         self.assertEqual(self.page.model_id, 'indextts2')
         with patch.object(self.page, 'launch_job') as launch:
             dialog.start_operation()
             self.page.start_setup('runtime', 'qwen3-0.6b')
-            launch.assert_not_called()
+            self.assertEqual(launch.call_count, 2)
+            self.assertEqual(launch.call_args.args[1]['backend'], 'audio.cpp')
         manager = DubbingModelDialog(self.host, self.page)
         button = manager.model_table.cellWidget(1, 4).findChild(HyperlinkButton)
         self.assertEqual(button.text(), 'audio.cpp')
-        self.assertEqual(button.toolTip(), '暂不可用')
+        self.assertIn('尚未下载', button.toolTip())
         self.assertEqual(len(manager.model_table.cellWidget(1, 4).findChildren(HyperlinkButton)), 1)
         dialog.program_combo.setCurrentIndex(dialog.program_combo.findData('pytorch'))
         self.assertTrue(dialog.program_download_btn.isEnabled())

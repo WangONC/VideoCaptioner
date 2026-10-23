@@ -50,22 +50,24 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaises(ValueError): store.save(' ', value)
     def test_execution_allowlist(self):
         self.assertTrue(executable(normalized({})))
-        for key, value in dict(model_id='edge-tts', speed=1.1, language='英语', style='轻松', alignment='自然语速', output='配音音频', original='保留为独立音轨', overflow='保留超限音频').items():
+        for key, value in dict(speed=3.0, language='未知语言').items():
             self.assertFalse(executable(normalized({key:value})), key)
+        for key, value in dict(model_id='edge-tts', speed=1.1, language='英语', alignment='自然语速', overflow='保留超限音频', output='配音音频', original='保留为独立音轨').items():
+            self.assertTrue(executable(normalized({key:value})), key)
         page = DubbingInterface(self.host)
-        page.dubbing_settings['speed'] = 1.1
+        page.dubbing_settings['speed'] = 3.0
         with patch.object(page, 'launch_job') as launch:
             page.start_dubbing(); launch.assert_not_called()
-    def test_batch_dubbing_does_not_enqueue(self):
+    def test_batch_dubbing_requires_valid_inputs(self):
         page = BatchProcessInterface(self.host)
         page.task_type_combo.setCurrentText(str(BatchTaskType.DUBBING))
         page.add_task_to_table('/tmp/course.mp4')
-        self.assertFalse(page.start_all_btn.isEnabled())
+        self.assertTrue(page.start_all_btn.isEnabled())
         self.assertIn('未选择字幕', page.task_table.item(0,0).text())
         with patch.object(page.batch_thread, 'add_task') as add:
             page.start_all_tasks(); page.start_task('/tmp/course.mp4'); add.assert_not_called()
         page.task_type_combo.setCurrentText(str(BatchTaskType.DUBBING_SYNTHESIS))
-        self.assertFalse(page.start_all_btn.isEnabled())
+        self.assertTrue(page.start_all_btn.isEnabled())
         with patch.object(page.batch_thread, 'add_task') as add:
             page.start_all_tasks(); page.start_task('/tmp/course.mp4'); add.assert_not_called()
         page.task_type_combo.setCurrentText(str(BatchTaskType.FULL_PROCESS))
@@ -74,13 +76,13 @@ class SettingsTests(unittest.TestCase):
         page.task_type_combo.setCurrentText(str(BatchTaskType.TRANSCRIBE))
         self.assertFalse(page.dubbing_requested())
         page.close()
-    def test_worker_rejects_dubbing(self):
+    def test_worker_rejects_missing_dubbing_request(self):
         worker = BatchProcessThread()
         for kind in (BatchTaskType.DUBBING, BatchTaskType.DUBBING_SYNTHESIS):
             task = BatchTask('/tmp/course.mp4', kind)
             worker._process_task(task)
             self.assertEqual(task.status, BatchTaskStatus.FAILED)
-            self.assertEqual(task.error_message, '暂不可用')
+            self.assertIn('缺少配音任务配置', task.error_message)
     def test_association_validation(self):
         dialog = DubbingAssociationDialog('/tmp/course.mp4', {}, self.host)
         self.assertFalse(dialog.validate())

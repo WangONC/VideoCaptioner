@@ -359,8 +359,6 @@ class BatchProcessInterface(QWidget):
             "重新开始" if self.is_task_failed(status) else "开始",
         )
         if self.dubbing_requested():
-            start_action.setText("暂不可用")
-            start_action.setEnabled(False)
             association = Action(FIF.EDIT, "字幕与参考声音")
             association.triggered.connect(lambda: self.edit_dubbing_association(file_path))
             menu.addAction(association)
@@ -428,8 +426,6 @@ class BatchProcessInterface(QWidget):
                 break
 
     def start_all_tasks(self):
-        if self.dubbing_requested():
-            return
         # 检查是否有任务
         if self.task_table.rowCount() == 0:
             InfoBar.warning(
@@ -470,14 +466,9 @@ class BatchProcessInterface(QWidget):
             file_path = self.task_table.item(row, 0).toolTip()
             status = self.task_table.item(row, 2).text()
             if self.is_task_startable(status):
-                self.reset_task_for_start(row)
-                task_type = BatchTaskType(self.task_type_combo.currentText())
-                batch_task = BatchTask(file_path, task_type)
-                self.batch_thread.add_task(batch_task)
+                self.enqueue_task(row, file_path)
 
     def start_task(self, file_path: str):
-        if self.dubbing_requested():
-            return
         target_row = -1
         for row in range(self.task_table.rowCount()):
             if self.task_table.item(row, 0).toolTip() == file_path:
@@ -509,10 +500,26 @@ class BatchProcessInterface(QWidget):
         )
 
         # 创建并添加单个任务
-        self.reset_task_for_start(target_row)
+        self.enqueue_task(target_row, file_path)
+
+    def enqueue_task(self, row, file_path):
         task_type = BatchTaskType(self.task_type_combo.currentText())
-        batch_task = BatchTask(file_path, task_type)
-        self.batch_thread.add_task(batch_task)
+        try:
+            request = None
+            if self.dubbing_requested():
+                from app.core.dubbing.execution import build_request
+                from app.common.config import cfg
+                association = dict(self.dubbing_associations.get(file_path, {}))
+                mode = 'audio' if task_type == BatchTaskType.DUBBING else 'video'
+                subtitle_mode = ('soft' if cfg.soft_subtitle.value else 'hard') if mode == 'video' and cfg.need_video.value else 'none'
+                request = build_request(file_path, association.get('subtitle'), None,
+                    dict(self.dubbing_settings), association=association, output_mode=mode,
+                    subtitle_mode=subtitle_mode)
+            task = BatchTask(file_path, task_type, request)
+            self.reset_task_for_start(row)
+            self.batch_thread.add_task(task)
+        except Exception as error:
+            self.on_task_error(file_path, str(error))
 
     def cancel_task(self, file_path: str):
         self.dubbing_associations.pop(file_path, None)
@@ -552,11 +559,14 @@ class BatchProcessInterface(QWidget):
 
     def update_dubbing_controls(self):
         requested = self.dubbing_requested()
-        self.start_all_btn.setEnabled(not requested)
-        self.start_all_btn.setText('暂不可用' if requested else '开始处理')
+        self.start_all_btn.setEnabled(True)
+        self.start_all_btn.setText('开始处理')
         self.task_table.setHorizontalHeaderLabels(['视频 / 字幕 / 参考声音' if requested else '文件名', '进度', '状态'])
 
     def edit_dubbing_association(self, file_path):
+        active = self.batch_thread.current_tasks.get(file_path)
+        if active and active.status in (BatchTaskStatus.WAITING, BatchTaskStatus.RUNNING) and not active.cancelled:
+            return
         from app.components.dubbing_batch_dialog import DubbingAssociationDialog
         dialog = DubbingAssociationDialog(file_path, self.dubbing_associations.get(file_path, {}), self.window(),
             generated_subtitles=self.task_type_combo.currentText() == str(BatchTaskType.FULL_PROCESS))

@@ -49,6 +49,8 @@ class DubbingSettingsWidget(QWidget):
         self.combo(timing, 'alignment', '时间对齐', ['按字幕时间对齐', '自然语速'])
         self.number(timing, 'max_speedup', '最大加速倍数', 1., 2., .05)
         self.combo(timing, 'overflow', '时长超限', ['停止并提示', '保留超限音频'])
+        self.controls['alignment'].setToolTip('自然语速不强制压缩，超出的语音会顺延后续句子；原字幕时间不变')
+        self.controls['overflow'].setToolTip('保留超限音频时不截断语音，后续句子顺延，输出可能长于原视频')
         self.combo(timing, 'output', '输出', ['配音视频', '配音音频'])
         self.combo(timing, 'original', '原声', ['替换原声', '保留为独立音轨'])
         self.advanced_button = PushButton('高级设置', self)

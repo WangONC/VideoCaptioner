@@ -22,31 +22,37 @@ class DubbingJob(QThread):
         self.cancel_event = threading.Event()
         self.runtime_ready = False
     def run(self):
+        from app.core.dubbing.execution import execution_lane
         try:
-            if self.operation == 'dub':
-                from app.core.dubbing import DubbingConfig, DubbingPipeline
-                def progress(done, total, message):
-                    self.progress.emit(int(100*done/max(total, 1)), message)
-                DubbingPipeline(DubbingConfig(**self.config)).run(on_progress=progress, cancel_event=self.cancel_event)
-                result = self.config['output_path']
+            with execution_lane(self.cancel_event):
+                self.run_setup()
+        except Exception as error:
+            self.failed.emit(str(error))
+
+    def run_setup(self):
+        try:
+            if self.operation not in ('check_runtime', 'prepare', 'runtime', 'models'):
+                raise ValueError('未知环境操作')
+            if self.config.get('backend') == 'audio.cpp':
+                from app.core import audio_cpp_runtime as tts_runtime
             else:
                 from app.core import tts_runtime
-                if self.operation == 'check_runtime':
-                    state = tts_runtime.inspect_runtime(self.config, cancel=self.cancel_event)
-                    if not state['ready']:
-                        raise tts_runtime.RuntimeSetupError(state['message'])
-                    self.runtime_ready = True
-                    result = state['message']
-                elif self.operation == 'prepare':
-                    tts_runtime.prepare_runtime(lambda v,m:self.progress.emit(v//2,m), self.cancel_event, config=self.config)
-                    self.runtime_ready = True
-                    tts_runtime.download_models(lambda v,m:self.progress.emit(50+v//2,m), self.cancel_event, config=self.config)
-                    result = '环境与模型已准备'
-                else:
-                    function = tts_runtime.prepare_runtime if self.operation == 'runtime' else tts_runtime.download_models
-                    function(self.progress.emit, self.cancel_event, config=self.config)
-                    self.runtime_ready = self.operation == 'runtime'
-                    result = '运行环境已准备' if self.operation == 'runtime' else '模型下载完成'
+            if self.operation == 'check_runtime':
+                state = tts_runtime.inspect_runtime(self.config, cancel=self.cancel_event)
+                if not state['ready']:
+                    raise RuntimeError(state['message'])
+                self.runtime_ready = True
+                result = state['message']
+            elif self.operation == 'prepare':
+                tts_runtime.prepare_runtime(lambda v,m:self.progress.emit(v//2,m), self.cancel_event, config=self.config)
+                self.runtime_ready = True
+                tts_runtime.download_models(lambda v,m:self.progress.emit(50+v//2,m), self.cancel_event, config=self.config)
+                result = '环境与模型已准备'
+            else:
+                function = tts_runtime.prepare_runtime if self.operation == 'runtime' else tts_runtime.download_models
+                function(self.progress.emit, self.cancel_event, config=self.config)
+                self.runtime_ready = self.operation == 'runtime'
+                result = '运行环境已准备' if self.operation == 'runtime' else '模型下载完成'
             self.succeeded.emit(str(result))
         except Exception as error:
             self.failed.emit(str(error))
@@ -63,7 +69,8 @@ class DubbingInterface(QWidget):
         self.last_output = None
         self.environment_checks = {}
         self.model_id = "indextts2"
-        self.backend_choices = {}  # UI preview only; do not change inference configuration.
+        from app.core.dubbing.execution import backend_choices
+        self.backend_choices = backend_choices
         self.runtime_config = self.paths_for_model(self.model_id)
         from app.core.dubbing.settings import shared_settings
         self.dubbing_settings = shared_settings.value()
@@ -159,7 +166,7 @@ class DubbingInterface(QWidget):
         fields.setContentsMargins(20,20,20,20)
         fields.setSpacing(15)
         self.subtitle_input = self.file_row(fields, '字幕文件', '选择或拖入中文字幕', self.choose_subtitle)
-        self.subtitle_input.setToolTip('支持中文 SRT 或中英分行的双语 SRT。只合成中文行，原字幕不改动。')
+        self.subtitle_input.setToolTip('按输出语言选择 SRT 中对应的文本行，原字幕不改动。')
         self.output_input = self.file_row(fields, '输出文件', '选择保存位置', self.choose_output)
         layout.addWidget(inputs)
 
@@ -217,20 +224,19 @@ class DubbingInterface(QWidget):
         self.video_input.setText(path)
         self.video_title.setText(Path(path).name)
         self.video_detail.setText(f'{Path(path).stat().st_size / 1024 / 1024:.1f} MB' if Path(path).is_file() else '')
-        target = Path(path).with_name(Path(path).stem+'-中文配音.mp4')
-        if target.exists():
-            number=2
-            while target.exists():
-                target=Path(path).with_name(Path(path).stem+f'-中文配音-{number}.mp4'); number+=1
-        self.output_input.setText(str(target))
+        from app.core.dubbing.execution import next_output
+        mode = 'audio' if self.current_settings()['output'] == '配音音频' else 'video'
+        self.output_input.setText(next_output(path, mode))
 
     def choose_subtitle(self):
         path, _ = QFileDialog.getOpenFileName(self, '选择中文字幕', '', 'SRT 字幕 (*.srt)')
         if path: self.subtitle_input.setText(path)
 
     def choose_output(self):
-        path, _ = QFileDialog.getSaveFileName(self, '保存配音视频', self.output_input.text(), 'MP4 视频 (*.mp4)')
-        if path: self.output_input.setText(path if path.lower().endswith('.mp4') else path+'.mp4')
+        audio = self.current_settings()['output'] == '配音音频'
+        suffix = '.wav' if audio else '.mp4'
+        path, _ = QFileDialog.getSaveFileName(self, '保存配音', self.output_input.text(), 'WAV 音频 (*.wav)' if audio else 'MP4 视频 (*.mp4)')
+        if path: self.output_input.setText(path if path.lower().endswith(suffix) else path + suffix)
 
     def set_inputs(self, video_path, subtitle_path):
         self.set_video(str(video_path))
@@ -253,7 +259,11 @@ class DubbingInterface(QWidget):
 
     def apply_shared_settings(self, value):
         from app.core.dubbing.settings import MODEL_OPTIONS
+        old_output = self.dubbing_settings.get('output')
         self.dubbing_settings = dict(value)
+        if old_output != value['output'] and self.output_input.text():
+            target = Path(self.output_input.text())
+            self.output_input.setText(str(target.with_suffix('.wav' if value['output'] == '配音音频' else '.mp4')))
         self.model_id = value['model_id']
         self.model_button.setText(MODEL_OPTIONS[self.model_id]['name'])
         if self.model_id in MODELS:
@@ -270,21 +280,26 @@ class DubbingInterface(QWidget):
     def set_backend(self, model_id, backend):
         if self.job is not None or backend not in ('pytorch', 'audio.cpp'):
             return
+        if backend == 'audio.cpp':
+            from app.core.audio_cpp_runtime import AUDIO_CPP_MODELS
+            if model_id not in AUDIO_CPP_MODELS:
+                return
         self.backend_choices[model_id] = backend
+        if model_id == self.model_id:
+            self.runtime_config = self.paths_for_model(model_id)
         self.setup_finished.emit()
 
     def environment_key(self, model_id):
         paths = self.paths_for_model(model_id)
         if self.backend_for_model(model_id) == 'audio.cpp':
-            return ('audio.cpp',)
+            return ('audio.cpp', paths['python_path'])
         return ('pytorch', MODELS[model_id]['engine'], paths['python_path'], paths['repo_path'])
 
     def environment_state(self, model_id):
         paths = self.paths_for_model(model_id)
         backend = self.backend_for_model(model_id)
         if backend == 'audio.cpp':
-            return dict(installed=False, ready=False, label='未接入',
-                        message='暂不可用')
+            installed = Path(paths['python_path']).is_file()
         else:
             installed = Path(paths['python_path']).is_file() or Path(paths['repo_path']).exists()
         check = self.environment_checks.get(self.environment_key(model_id))
@@ -298,9 +313,17 @@ class DubbingInterface(QWidget):
 
     def model_downloaded(self, model_id):
         paths = self.paths_for_model(model_id)
-        return (Path(paths['model_dir'])/'videocaptioner-models.json').is_file()
+        if self.backend_for_model(model_id) == 'audio.cpp':
+            from app.core.audio_cpp_runtime import models_ready
+        else:
+            from app.core.tts_runtime import models_ready
+        return models_ready(dict(paths, model_id=model_id))
 
     def model_download_size(self, model_id):
+        if self.backend_for_model(model_id) == 'audio.cpp':
+            from app.core.audio_cpp_runtime import required_models
+            total = sum(spec['size'] for spec in required_models(model_id))
+            return f'{total / 1e9:.2f} GB'
         return MODELS[model_id].get('download_size', '待获取')
 
     def edit_runtime(self):
@@ -312,17 +335,8 @@ class DubbingInterface(QWidget):
         self.environment_dialog.show()
 
     def paths_for_model(self,model_id):
-        from app.core.tts_runtime import default_paths
-        paths=default_paths(model_id)
-        if model_id=='indextts2':paths.update(self.load_runtime_config())
-        else:
-            file=APPDATA_PATH/('dubbing-runtime-'+model_id+'.json')
-            try:
-                if file.exists():
-                    saved=json.loads(file.read_text('utf8'))
-                    paths.update({key: str(saved[key]) for key in paths if saved.get(key)})
-            except (ValueError,OSError):pass
-        return paths
+        from app.core.dubbing.execution import runtime_paths
+        return runtime_paths(model_id)
 
     def select_model(self,model_id):
         if self.job is not None:return
@@ -341,44 +355,26 @@ class DubbingInterface(QWidget):
         if target not in MODELS:
             self.status_label.setText("暂不可用")
             return
-        if self.backend_for_model(target) == 'audio.cpp':
-            self.status_label.setText('暂不可用')
-            return
-        if self.job is None: self.launch_job(operation, dict(self.paths_for_model(target),model_id=target))
+        if self.job is None: self.launch_job(operation, dict(self.paths_for_model(target),model_id=target,backend=self.backend_for_model(target)))
 
     def start_dubbing(self):
         if self.job is not None: return
-        if self.backend_for_model(self.model_id) == 'audio.cpp':
-            self.status_label.setText('暂不可用')
-            return
-        from app.core.dubbing.settings import executable, validation_error
-        settings = self.current_settings()
-        if not executable(settings):
-            self.status_label.setText('暂不可用')
-            return
-        from app.core.dubbing import parse_srt
+        from app.core.dubbing.execution import build_request
         try:
-            error = validation_error(settings)
-            if error: raise ValueError(error)
-            video = Path(self.video_input.text()).resolve()
-            subtitles = Path(self.subtitle_input.text()).resolve()
-            output = Path(self.output_input.text()).resolve()
-            if output in (video, subtitles) or output.exists():
-                raise ValueError('输出文件已存在或与输入重名，请选择新的文件名，避免覆盖。')
-            parse_srt(subtitles.read_text('utf-8-sig'))
-            reference = settings['reference_audio'].strip() if settings['source'] == '参考音频' else None
-            if settings['source'] == '参考音频' and not reference:
-                raise ValueError('请选择参考音频，或启用自动提取。')
-            config=dict(video_path=str(video),srt_path=str(subtitles),output_path=str(output),
-                cache_dir=str(CACHE_PATH/'dubbing'),reference_audio=reference,reference_text=settings['reference_text'] or None,
-                max_speedup=settings['max_speedup'],model_id=self.model_id,**self.runtime_config)
-            self.launch_job('dub', config)
+            request = build_request(self.video_input.text(), self.subtitle_input.text(),
+                self.output_input.text(), self.current_settings(), runtime=self.runtime_config)
+            self.launch_job('dub', request)
         except Exception as error:
             self.on_failure(str(error))
 
     def launch_job(self, operation, config):
         self.details.clear();self.details.hide();self.progress_bar.setValue(0);self.progress_bar.show()
-        self.job=DubbingJob(operation,config,self)
+        if operation == 'dub':
+            from app.thread.dubbing_thread import DubbingThread
+            self.job = DubbingThread(config, self)
+            self.job.cancelled.connect(lambda: self.on_failure('已取消，完成的句子已缓存'))
+        else:
+            self.job = DubbingJob(operation, config, self)
         self.job.progress.connect(self.on_progress)
         self.job.succeeded.connect(self.on_success)
         self.job.failed.connect(self.on_failure)
@@ -404,14 +400,14 @@ class DubbingInterface(QWidget):
         else:
             if self.job and self.job.operation in ('runtime', 'prepare', 'check_runtime'):
                 key = self.environment_key(self.job.config['model_id'])
-                self.environment_checks[key] = (True, 'GPU 运行环境可用')
+                self.environment_checks[key] = (True, '运行环境可用')
             self.status_label.setText(result);self.runtime_status.setText(result)
 
     def on_failure(self, message):
         canceled=self.job is not None and self.job.cancel_event.is_set()
         if self.job and self.job.operation in ('runtime', 'prepare', 'check_runtime') and not canceled:
             ready = self.job.runtime_ready
-            self.environment_checks[self.environment_key(self.job.config['model_id'])] = (ready, 'GPU 运行环境可用' if ready else message)
+            self.environment_checks[self.environment_key(self.job.config['model_id'])] = (ready, '运行环境可用' if ready else message)
         self.status_label.setText('已取消，完成的句子已缓存，可再次开始继续' if canceled else '任务未完成，请查看原因')
         self.details.setPlainText(message);self.details.show()
 

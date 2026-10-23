@@ -24,8 +24,10 @@ class DubbingEnvironmentDialog(MessageBoxBase):
         controls = QHBoxLayout()
         self.program_combo = ComboBox(self)
         self.program_combo.setFixedWidth(300)
-        self.program_combo.addItem('官方 PyTorch（自动适配 GPU）', userData='pytorch')
-        self.program_combo.addItem('audio.cpp', userData='audio.cpp')
+        self.program_combo.addItem('Edge TTS（在线）' if model_id == 'edge-tts' else '官方 PyTorch（自动适配 GPU）', userData='pytorch')
+        from app.core.audio_cpp_runtime import AUDIO_CPP_MODELS
+        if model_id in AUDIO_CPP_MODELS:
+            self.program_combo.addItem('audio.cpp', userData='audio.cpp')
         self.program_combo.setCurrentIndex(self.program_combo.findData(page.backend_for_model(model_id)))
         self.program_combo.currentIndexChanged.connect(self.backend_changed)
         self.program_combo.setToolTip('选择推理后端')
@@ -56,11 +58,11 @@ class DubbingEnvironmentDialog(MessageBoxBase):
         state = self.page.environment_state(self.model_id)
         self.status_label.setText(state['message'])
         self.program_download_btn.setText('检查环境' if state['installed'] else '下载环境')
-        self.program_download_btn.setEnabled(self.page.job is None and self.program_combo.currentData() != 'audio.cpp')
+        self.program_download_btn.setEnabled(self.page.job is None)
         self.program_combo.setEnabled(self.page.job is None)
 
     def start_operation(self):
-        if self.page.job is not None or self.program_combo.currentData() == 'audio.cpp':
+        if self.page.job is not None:
             return
         state = self.page.environment_state(self.model_id)
         self.page.start_setup('check_runtime' if state['installed'] else 'runtime', self.model_id)
@@ -118,7 +120,7 @@ class DubbingModelDialog(WhisperCppDownloadDialog):
         self.model_table.setRowCount(len(MODELS))
         for row, (model_id, model) in enumerate(MODELS.items()):
             downloaded = self.page.model_downloaded(model_id)
-            for column, text in enumerate((model['name'], self.page.model_download_size(model_id), '已下载' if downloaded else '未下载')):
+            for column, text in enumerate((model['name'], self.page.model_download_size(model_id), '在线' if model_id == 'edge-tts' else '已下载' if downloaded else '未下载')):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignCenter)
                 self.model_table.setItem(row, column, item)
@@ -140,7 +142,7 @@ class DubbingModelDialog(WhisperCppDownloadDialog):
             label = ('audio.cpp' if self.page.backend_for_model(model_id) == 'audio.cpp' else
                      '安装环境' if not state['installed'] else
                      '检查环境' if not state['ready'] else
-                     'audio.cpp' if self.page.backend_for_model(model_id) == 'audio.cpp' else 'PyTorch')
+                     '在线' if model_id == 'edge-tts' else 'PyTorch')
             env_layout.addStretch()
             settings = HyperlinkButton('', label, environment)
             settings.setToolTip(state['message'])

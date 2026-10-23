@@ -46,6 +46,13 @@ class SubtitleTests(unittest.TestCase):
     def test_adjacent_short_reference(self):
         cues = parse_srt('1\n00:00:00,000 --> 00:00:02,000\n你好\n\n2\n00:00:02,100 --> 00:00:04,000\n世界\n')
         self.assertEqual(select_reference(cues).end, 4)
+    def test_multilingual_lines_are_not_voiced_twice(self):
+        prefix = '1\n00:00:00,000 --> 00:00:04,000\n'
+        self.assertEqual(parse_srt(prefix + 'これは日本語です\n这是中文翻译')[0].speech_text, '这是中文翻译')
+        self.assertEqual(parse_srt(prefix + 'GPUをテストします\nWe test the GPU.', '英语')[0].speech_text, 'We test the GPU.')
+        self.assertEqual(parse_srt(prefix + 'GPU를 테스트합니다\n测试 GPU。')[0].speech_text, '测试 GPU。')
+        self.assertEqual(parse_srt(prefix + 'GPUをテストします\n测试 GPU。', '日语')[0].speech_text, 'GPUをテストします')
+
     def test_invalid(self):
         for srt in ('', SRT.replace('00:00:04,500', '00:00:03,500'), SRT.replace('00:00:04,000', '00:00:00,000'), SRT.replace('00:00:00,500', '00:61:00,500'), '1\n00:00:00,000 --> 00:00:04,000\nEnglish only'):
             with self.subTest(srt=srt), self.assertRaises(DubbingError): parse_srt(srt)
@@ -103,7 +110,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(provider.calls),1); self.assertFalse(Path(self.config.output_path).exists())
         provider=FakeProvider(); DubbingPipeline(self.config,provider).run(); self.assertEqual(len(provider.calls),1)
     def test_speed_limit_without_output(self):
-        with self.assertRaisesRegex(DubbingError,'shorten the Chinese text'):
+        with self.assertRaisesRegex(DubbingError,'shorten the text'):
             DubbingPipeline(self.config,FakeProvider(seconds=8)).run()
         self.assertFalse(Path(self.config.output_path).exists())
     def test_output_created_during_job_is_preserved(self):
