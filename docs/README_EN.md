@@ -4,9 +4,23 @@
   <h1>VideoCaptioner</h1>
   <p>An LLM-powered video subtitle processing assistant, supporting speech recognition, subtitle segmentation, optimization, and translation.</p>
 
-  [简体中文](./README.md) / [正體中文](./docs/README_TW.md) / English / [日本語](./docs/README_JA.md)
+  [简体中文](../README.md) / [正體中文](./README_TW.md) / [English](./README_EN.md) / [日本語](./README_JA.md)
 
 </div>
+
+## Differences from upstream
+
+This is an independently maintained fork of [WEIFENG2333/VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner), tailored to personal video and course subtitle workflows. It does not promise feature parity with upstream.
+
+- Standalone subtitle/video composition using existing subtitles, without repeating transcription or translation.
+- A transcription-and-segmentation workflow without subsequent optimization or translation.
+- Recursive folder import with filtering of designated output filename prefixes to avoid reprocessing generated files.
+- Restarting failed tasks directly.
+- Dedicated TranslateGemma support, plus improvements to subtitle format compatibility, concurrent cache access, and output naming.
+
+Upstream has since implemented similar functionality in some areas, but behavior may differ. This fork is defined by its current code and does not include every feature from the latest upstream version.
+
+Thanks to the original author and contributors. Existing copyright notices and the [GPL-3.0 license](../LICENSE) are preserved.
 
 ## 📖 Introduction
 
@@ -31,106 +45,26 @@ The latest version now supports VAD, vocal separation, word-level timestamps, ba
 ![Page Preview](https://h1.appinn.me/file/1731487410832_preview2.png)
 
 
-## 🧪 Testing
-
-Processing a 14-minute 1080P [English TED video from Bilibili](https://www.bilibili.com/video/BV1jT411X7Dz) end-to-end, using the local Whisper model for speech recognition and the `gpt-4o-mini` model for optimization and translation into Chinese, took approximately **3 minutes**.
-
-Based on backend calculations, the cost for model optimization and translation was less than ¥0.01 (calculated using OpenAI's official pricing).
-
-For detailed results of subtitle and video synthesis, please refer to the [TED Video Test](./docs/test.md).
-
-
 ## 🚀 Quick Start
 
-### For Windows Users
+This fork does not currently provide its own installer. Upstream installers do not include the changes in this fork. Run from source after installing Python, FFmpeg, and Aria2, with external tools available on PATH.
 
-The software is lightweight, with a package size of less than 60MB, and includes all necessary environments. Download and run directly.
-
-1. Download the latest version of the executable from the [Release](https://github.com/WEIFENG2333/VideoCaptioner/releases) page. Or: [Lanzou Cloud Download](https://wwwm.lanzoue.com/iam1L2n8n3za)
-
-2. Open the installer to install.
-
-3. (Optional) LLM API Configuration, choose whether to enable subtitle optimization or subtitle translation.
-
-4. Drag and drop the video file into the software window for fully automatic processing.
-
-Note: Each step supports independent processing and file drag-and-drop.
-
-<details>
-<summary>For MacOS Users</summary>
- 
- 
-Due to my lack of a Mac, I cannot test and package for MacOS.  MacOS executables are temporarily unavailable.
-
-Mac users, please download the source code and install Python dependencies to run. (Local Whisper functionality is currently not supported on MacOS.)
-
-1. Install ffmpeg and Aria2 download tools
 ```bash
-brew install ffmpeg
-brew install aria2
-brew install python@3.**
-```
-
-2. Clone the project
-```bash
-git clone https://github.com/WEIFENG2333/VideoCaptioner.git
+git clone https://github.com/WangONC/VideoCaptioner.git
 cd VideoCaptioner
 ```
 
-3. Install dependencies
-```bash
-python3.** -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+Install dependencies and start the application:
 
-4. Run the program
 ```bash
+python -m venv .venv
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# macOS / Linux: source .venv/bin/activate
+python -m pip install -r requirements.txt
 python main.py
 ```
-</details>
 
-<details>
-<summary>Docker Deployment (beta)</summary>
-
-The current application is relatively basic.  We welcome PR contributions.
-
-### 1. Clone the project
-
-```bash
-git clone https://github.com/WEIFENG2333/VideoCaptioner.git
-cd VideoCaptioner
-```
-
-### 2. Build the image
-
-```bash
-docker build -t video-captioner .
-```
-
-### 3. Run the container
-
-Run with custom API configuration:
-```bash
-docker run -d \
-  -p 8501:8501 \
-  -v $(pwd)/temp:/app/temp \
-  -e OPENAI_BASE_URL="Your API address" \
-  -e OPENAI_API_KEY="Your API key" \
-  --name video-captioner \
-  video-captioner
-```
-
-### 4. Access the application
-
-Open your browser and go to: `http://localhost:8501`
-
-### Notes
-
-- The container already includes necessary dependencies like ffmpeg.
-- If you need to use other models, please configure them through environment variables.
-
-</details>
+Configure speech recognition and any translation service you need in Settings, then import videos or subtitles. Existing subtitles can be composed with videos without repeating transcription.
 
 ## ✨ Main Features
 
@@ -166,7 +100,7 @@ The software fully utilizes the advantages of Large Language Models (LLMs) in un
 | Configuration Item | Description |
 |--------|------|
 | Built-in Model | The software includes a basic large language model (`gpt-4o-mini`), which can be used without configuration (public service is unstable). |
-| API Support | Supports standard OpenAI API format. Compatible with [SiliconCloud](https://cloud.siliconflow.cn/i/HF95kaoz), [DeepSeek](https://platform.deepseek.com/), [Ollama](https://ollama.com/blog/openai-compatibility), etc. <br>For configuration methods, please refer to the [Configuration Documentation](./docs/llm_config.md). |
+| API Support | Supports standard OpenAI API format. Compatible with [SiliconCloud](https://cloud.siliconflow.cn), [DeepSeek](https://platform.deepseek.com/), [Ollama](https://ollama.com/blog/openai-compatibility), etc. <br>For configuration methods, please refer to the [Configuration Documentation](./llm_config.md). |
 
 Recommended models: For higher quality, choose `Claude-3.5-sonnet` or `gpt-4o`.
 
@@ -219,7 +153,7 @@ If you encounter the following situations when using the URL download function:
 2. Only lower resolution videos can be downloaded.
 3. Verification is required when network conditions are poor.
 
-- Please refer to the [Cookie Configuration Instructions](./docs/get_cookies.md) to obtain cookie information and place the `cookies.txt` file in the `AppData` directory of the software installation directory to download high-quality videos normally.
+- Please refer to the [Cookie Configuration Instructions](./get_cookies.md) to obtain cookie information and place the `cookies.txt` file in the `AppData` directory of the software installation directory to download high-quality videos normally.
 
 ## 💡 Software Process Introduction
 
@@ -250,10 +184,6 @@ VideoCaptioner/
 2. During processing, only the text content is sent to the large language model, without timeline information, which greatly reduces processing overhead.
 
 3. In the translation stage, we adopt the "translate-reflect-translate" methodology proposed by Andrew Ng.  This iterative optimization method not only ensures the accuracy of the translation.
-
-## 🤝 Contribution Guidelines
-
-The author is a junior college student. Both my personal abilities and the project have many shortcomings.  The project is also constantly being improved.  If you encounter any bugs during use, please feel free to submit [Issues](https://github.com/WEIFENG2333/VideoCaptioner/issues) and Pull Requests to help improve the project.
 
 ## Update Log
 
@@ -341,16 +271,3 @@ The author is a junior college student. Both my personal abilities and the proje
 - Added real-time viewing of running logs on the software homepage
 - Unified and improved internal software functions
 </details>
-
-## ⭐ Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=WEIFENG2333/VideoCaptioner&type=Date)](https://star-history.com/#WEIFENG2333/VideoCaptioner&Date)
-
-## 💖 Support the Author
-
-If you find this project helpful, please give it a Star. This will be the greatest encouragement and support for me!
-
-<div align="center">
-  <img src="./images/alipay.jpg" alt="Alipay QR Code" width="30%">
-  <img src="./images/wechat.jpg" alt="WeChat QR Code" width="30%">
-</div>

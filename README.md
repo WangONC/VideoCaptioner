@@ -8,6 +8,20 @@
   
 </div>
 
+## 本分支与上游的区别
+
+本项目基于 [WEIFENG2333/VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner)，按个人的视频与课程字幕处理需求独立维护，不保证与上游同步更新。
+
+- 独立字幕视频合成：使用已有字幕合成视频，无需重新转录或翻译。
+- 转录＋断句流程：仅完成转录和断句，不必继续优化、翻译。
+- 文件夹递归导入：自动过滤带有指定输出前缀的文件，避免重复处理。
+- 失败任务重试：失败后可直接重新启动任务。
+- TranslateGemma 专门适配，以及字幕格式兼容、缓存并发和输出命名等改进。
+
+部分功能上游后续也已有类似实现，但具体行为不完全相同。本分支以当前代码为准，不代表包含上游最新版的全部功能。
+
+感谢原作者及贡献者。原有版权声明和 [GPL-3.0 许可证](./LICENSE) 保持不变。
+
 ## 📖 项目介绍
 
 卡卡字幕助手（VideoCaptioner）操作简单且无需高配置，支持网络调用和本地离线（支持调用GPU）两种方式进行语音识别，利用可用通过大语言模型进行字幕智能断句、校正、翻译，字幕视频全流程一键处理！为视频配上效果惊艳的字幕。
@@ -31,111 +45,26 @@
 ![页面预览](https://h1.appinn.me/file/1731487410832_preview2.png)
 
 
-## 🧪 测试
-
-全流程处理一个14分钟1080P的 [B站英文 TED 视频](https://www.bilibili.com/video/BV1jT411X7Dz)，调用本地 Whisper 模型进行语音识别，使用 `gpt-4o-mini` 模型优化和翻译为中文，总共消耗时间约 **4 分钟**。
-
- 近后台计算，模型优化和翻译消耗费用不足 ￥0.01（以OpenAI官方价格为计算）
-
-具体字幕和视频合成的效果的测试结果图片，请参考 [TED视频测试](./docs/test.md)
-
-
 ## 🚀 快速开始
 
-### Windows 用户
+本分支暂未提供独立安装包；上游发布的安装包不包含本分支的修改。请从源码运行。先安装 Python、FFmpeg 和 Aria2，并确保外部工具可从 PATH 访问。
 
-软件较为轻量，打包大小不足 60M,已集成所有必要环境，下载后可直接运行。
-
-1. 从 [Release](https://github.com/WEIFENG2333/VideoCaptioner/releases) 页面下载最新版本的可执行程序。或者：[蓝奏盘下载](https://wwwm.lanzoue.com/ii14G2pdsbej)
-
-2. 打开安装包进行安装
-
-3. LLM API 配置，（用于字幕断句、校正），可使用 [✨本项目的中转站 ](https://api.videocaptioner.cn) 
-
-4. 翻译配置，选择是否启用翻译，翻译服务（默认使用微软翻译，质量一般，推荐使用大模型翻译）
-
-5. 语音识别配置（默认使用B接口，中英以外的语言请使用本地转录）
-
-6. 拖拽视频文件到软件窗口，即可全自动处理
-
-提示：每一个步骤均支持单独处理，均支持文件拖拽。软件具体模型选择和参数配置说明，请查看下文。
-
-<details>
-<summary>MacOS 用户</summary>
- 
- 
-由于本人缺少 Mac，所以没法测试和打包，暂无法提供 MacOS 的可执行程序。
-
-Mac 用户请自行使用下载源码和安装 python 依赖运行。（本地 Whisper 功能暂不支持 MacOS）
-
-1. 安装 ffmpeg 和 Aria2 下载工具
 ```bash
-brew install ffmpeg
-brew install aria2
-brew install python@3.**
-```
-
-2. 克隆项目
-```bash
-git clone https://github.com/WEIFENG2333/VideoCaptioner.git
+git clone https://github.com/WangONC/VideoCaptioner.git
 cd VideoCaptioner
 ```
 
-3. 安装依赖
-```bash
-python3.** -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+安装依赖并启动：
 
-4. 运行程序
 ```bash
+python -m venv .venv
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# macOS / Linux: source .venv/bin/activate
+python -m pip install -r requirements.txt
 python main.py
 ```
-</details>
 
-<details>
-<summary>Docker 部署（beta）</summary>
-
-目前本项目streamlit应用因为项目重构过，Docker不可以使用。欢迎各位PR贡献新代码。
-
-### 1. 克隆项目
-
-```bash
-git clone https://github.com/WEIFENG2333/VideoCaptioner.git
-cd VideoCaptioner
-
-```
-
-### 2. 构建镜像
-
-```bash
-docker build -t video-captioner .
-```
-
-### 3. 运行容器
-
-使用自定义API配置运行：
-```bash
-docker run -d \
-  -p 8501:8501 \
-  -v $(pwd)/temp:/app/temp \
-  -e OPENAI_BASE_URL="你的API地址" \
-  -e OPENAI_API_KEY="你的API密钥" \
-  --name video-captioner \
-  video-captioner
-```
-
-### 4. 访问应用
-
-打开浏览器访问：`http://localhost:8501`
-
-### 注意事项
-
-- 容器内已预装ffmpeg等必要依赖
-- 如需使用其他模型，请通过环境变量配置
-
-</details>
+进入设置配置语音识别和需要使用的翻译服务，再导入视频或字幕。已有字幕可单独合成，无需重复转录。
 
 ## ⚙️ 基本配置
 
@@ -145,7 +74,7 @@ LLM 大模型是用来字幕段句、字幕优化、以及字幕翻译（如果�
 
 | 配置项 | 说明 |
 |--------|------|
-| SiliconCloud | [SiliconCloud 官网](https://cloud.siliconflow.cn/i/onCHcaDx)配置方法请参考[配置文档](./docs/llm_config.md)<br>该并发较低，建议把线程设置为5以下。 |
+| SiliconCloud | [SiliconCloud 官网](https://cloud.siliconflow.cn)配置方法请参考[配置文档](./docs/llm_config.md)<br>该并发较低，建议把线程设置为5以下。 |
 | DeepSeek | [DeepSeek 官网](https://platform.deepseek.com)，建议使用 `deepseek-v3` 模型，<br>官方网站最近服务好像并不太稳定。 |
 | Ollama本地 | [Ollama 官网](https://ollama.com) |
 | 内置公益模型 | 内置基础大语言模型（`gpt-4o-mini`）(公益服务不稳定，强烈建议请使用自己的模型API) |
@@ -153,33 +82,6 @@ LLM 大模型是用来字幕段句、字幕优化、以及字幕翻译（如果�
 
 注：如果用的 API 服务商不支持高并发，请在软件设置中将“线程数”调低，避免请求错误。
 
----
-
-如果希望高并发⚡️，或者希望在在软件内使用使用 OpenAI 或者 Claude 等优质大模型进行字幕校正和翻译。
-
-可使用本项目的✨LLM API中转站✨： [https://api.videocaptioner.cn](https://api.videocaptioner.cn)
-
-其支持高并发，性价比极高，且有国内外大量模型可挑选。
-
-注册获取key之后，设置中按照下面配置：
-
-BaseURL: `https://api.videocaptioner.cn/v1`
-
-API-key: `个人中心-API 令牌页面自行获取。`
-
-💡 模型选择建议 (本人在各质量层级中精选出的高性价比模型)： 
-
- - 高质量之选： `claude-3-5-sonnet-20241022` (耗费比例：3) 
-
- - 较高质量之选： `gemini-2.0-flash`、`deepseek-chat` (耗费比例：1) 
-
- - 中质量之选： `gpt-4o-mini`、`gemini-1.5-flash` (耗费比例：0.15) 
-
-本站支持超高并发，软件中线程数直接拉满即可~ 处理速度非常快~
-
-更详细的API配置教程：[中转站配置配置](./docs/llm_config.md#中转站配置)
-
----
 
 ## 2. 翻译配置
 
@@ -330,10 +232,6 @@ VideoCaptioner/
 
 4. 填入 YouTube 链接时进行处理时，会自动下载视频的字幕，从而省去转录步骤，极大地节省操作时间。
 
-## 🤝 贡献指南
-
-作者是一名大三学生，个人能力和项目都还有许多不足，项目也在不断完善中，如果在使用过程遇到的Bug，欢迎提交 [Issue](https://github.com/WEIFENG2333/VideoCaptioner/issues) 和 Pull Request 帮助改进项目。
-
 ## 更新日志
 
 <details>
@@ -431,22 +329,3 @@ VideoCaptioner/
 - 软件主页新增运行日志实时查看
 - 统一和完善软件内部功能
 </details>
-
-
-## 💖 支持作者
-
-如果觉得项目对你有帮助，可以给项目点个Star，这将是对我最大的鼓励和支持！
-
-<details>
-<summary>捐助支持</summary>
-<div align="center">
-  <img src="./docs/images/alipay.jpg" alt="支付宝二维码" width="30%">
-  <img src="./docs/images/wechat.jpg" alt="微信二维码" width="30%">
-</div>
-</details>
-
-## ⭐ Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=WEIFENG2333/VideoCaptioner&type=Date)](https://star-history.com/#WEIFENG2333/VideoCaptioner&Date)
-
-

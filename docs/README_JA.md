@@ -4,9 +4,23 @@
   <h1>VideoCaptioner</h1>
   <p>音声認識、字幕のセグメンテーション、最適化、翻訳をサポートするLLM駆動のビデオ字幕処理アシスタント。</p>
 
-  [简体中文](./README.md) / [正體中文](./docs/README_TW.md) / [English](./docs/READNE_EN.md) / 日本語
+  [简体中文](../README.md) / [正體中文](./README_TW.md) / [English](./README_EN.md) / [日本語](./README_JA.md)
 
 </div>
+
+## 上流プロジェクトとの違い
+
+本プロジェクトは [WEIFENG2333/VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner) を基に、個人の動画・講座字幕の処理用途に合わせて独立して保守しているフォークです。上流との機能の同期は保証しません。
+
+- 既存の字幕を使った動画への字幕合成。文字起こしや翻訳をやり直す必要はありません。
+- 文字起こしと文の分割だけを行い、その後の校正・翻訳を省略できる処理フロー。
+- フォルダーの再帰的な読み込みと、指定の出力ファイル名プレフィックスによる除外。
+- 失敗したタスクの再実行。
+- TranslateGemma 向けの対応、字幕形式の互換性、キャッシュへの並行アクセス、出力ファイル名の改善。
+
+一部の機能は上流にも後から同様の実装が追加されていますが、動作が完全に同じとは限りません。本フォークの機能は現在のコードに準じ、上流の最新版にあるすべての機能を含むものではありません。
+
+原作者と貢献者に感謝します。既存の著作権表示と [GPL-3.0 ライセンス](../LICENSE) は維持しています。
 
 ## 📖 はじめに
 
@@ -30,106 +44,26 @@ Kaka 字幕アシスタント（VideoCaptioner）は操作が簡単で、高性�
 ![ページプレビュー](https://h1.appinn.me/file/1731487410170_preview1.png)
 ![ページプレビュー](https://h1.appinn.me/file/1731487410832_preview2.png)
 
-## 🧪 テスト
-
-14分の1080P [Bilibiliの英語TEDビデオ](https://www.bilibili.com/video/BV1jT411X7Dz)をエンドツーエンドで処理し、ローカルWhisperモデルを使用して音声認識を行い、`gpt-4o-mini`モデルを使用して中国語に最適化および翻訳するのに約**3分**かかりました。
-
-バックエンドの計算に基づくと、モデルの最適化と翻訳のコストは¥0.01未満でした（OpenAIの公式価格を使用して計算）。
-
-字幕とビデオ合成の詳細な結果については、[TEDビデオテスト](./docs/test.md)を参照してください。
-
-
 ## 🚀 クイックスタート
 
-### Windowsユーザー向け
+本フォーク専用のインストーラーは現在提供していません。上流のインストーラーには本フォークの変更は含まれません。Python、FFmpeg、Aria2 をインストールし、外部ツールに PATH が通っていることを確認してから、ソースコードで実行してください。
 
-このソフトウェアは軽量で、パッケージサイズは60MB未満であり、必要な環境がすべて含まれています。ダウンロードして直接実行できます。
-
-1. [リリースページ](https://github.com/WEIFENG2333/VideoCaptioner/releases)から最新バージョンの実行ファイルをダウンロードします。または：[Lanzou Cloud Download](https://wwwm.lanzoue.com/iam1L2n8n3za)
-
-2. インストーラーを開いてインストールします。
-
-3. （オプション）LLM API設定、字幕の最適化または翻訳を有効にするかどうかを選択します。
-
-4. ソフトウェアウィンドウにビデオファイルをドラッグアンドドロップして、完全自動処理を行います。
-
-注意：各ステップは独立した処理とファイルのドラッグアンドドロップをサポートしています。
-
-<details>
-<summary>MacOSユーザー向け</summary>
-
-開発者がMacを持っていないため、MacOSでのテストとパッケージ化ができません。MacOS用の実行ファイルは一時的に利用できません。
-
-Macユーザーは、ソースコードをダウンロードし、Pythonの依存関係をインストールして実行してください。（ローカルWhisper機能は現在MacOSではサポートされていません。）
-
-1. ffmpegとAria2ダウンロードツールをインストール
 ```bash
-brew install ffmpeg
-brew install aria2
-brew install python@3.**
-```
-
-2. プロジェクトをクローン
-```bash
-git clone https://github.com/WEIFENG2333/VideoCaptioner.git
+git clone https://github.com/WangONC/VideoCaptioner.git
 cd VideoCaptioner
 ```
 
-3. 依存関係をインストール
-```bash
-python3.** -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+依存パッケージをインストールして起動します：
 
-4. プログラムを実行
 ```bash
+python -m venv .venv
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# macOS / Linux: source .venv/bin/activate
+python -m pip install -r requirements.txt
 python main.py
 ```
-</details>
 
-
-<details>
-<summary>Docker デプロイメント (ベータ版)</summary>
-
-現在のアプリケーションは比較的基本的なものです。PRの貢献を歓迎します。
-
-### 1. プロジェクトをクローン
-
-```bash
-git clone https://github.com/WEIFENG2333/VideoCaptioner.git
-cd VideoCaptioner
-```
-
-### 2. イメージをビルド
-
-```bash
-docker build -t video-captioner .
-```
-
-### 3. コンテナを実行
-
-カスタムAPI設定で実行:
-```bash
-docker run -d \
-  -p 8501:8501 \
-  -v $(pwd)/temp:/app/temp \
-  -e OPENAI_BASE_URL="Your API address" \
-  -e OPENAI_API_KEY="Your API key" \
-  --name video-captioner \
-  video-captioner
-```
-
-### 4. アプリケーションにアクセス
-
-ブラウザを開いて、`http://localhost:8501`にアクセスしてください。
-
-### 注意事項
-
-- コンテナにはffmpegなどの必要な依存関係がすでに含まれています。
-- 他のモデルを使用する必要がある場合は、環境変数を通じて設定してください。
-
-</details>
+設定画面で音声認識と必要な翻訳サービスを設定し、動画または字幕を読み込みます。既存の字幕があれば、文字起こしをやり直さずに字幕付き動画を作成できます。
 
 ## ✨ 主要機能
 
@@ -164,7 +98,7 @@ docker run -d \
 | 設定項目 | 説明 |
 |--------|------|
 | 内蔵モデル | ソフトウェアには基本的な大規模言語モデル（`gpt-4o-mini`）が含まれており、設定なしで使用可能です（公共サービスは不安定です）。 |
-| APIサポート | 標準のOpenAI API形式をサポート。 [SiliconCloud](https://cloud.siliconflow.cn/i/HF95kaoz)、[DeepSeek](https://platform.deepseek.com/)、[Ollama](https://ollama.com/blog/openai-compatibility)などと互換性があります。<br>設定方法については、[設定ドキュメント](./docs/llm_config.md)を参照してください。 |
+| APIサポート | 標準のOpenAI API形式をサポート。 [SiliconCloud](https://cloud.siliconflow.cn)、[DeepSeek](https://platform.deepseek.com/)、[Ollama](https://ollama.com/blog/openai-compatibility)などと互換性があります。<br>設定方法については、[設定ドキュメント](./llm_config.md)を参照してください。 |
 
 推奨モデル：より高品質を求める場合は、`Claude-3.5-sonnet`または`gpt-4o`を選択してください。
 
@@ -214,7 +148,7 @@ URLダウンロード機能を使用する際に以下の状況に遭遇した�
 2. 低解像度のビデオしかダウンロードできない。
 3. ネットワーク状況が悪いときに認証が必要。
 
-- [Cookie設定手順](./docs/get_cookies.md)を参照して、cookie情報を取得し、`cookies.txt`ファイルをソフトウェアのインストールディレクトリの`AppData`ディレクトリに配置して、高品質のビデオを通常通りダウンロードしてください。
+- [Cookie設定手順](./get_cookies.md)を参照して、cookie情報を取得し、`cookies.txt`ファイルをソフトウェアのインストールディレクトリの`AppData`ディレクトリに配置して、高品質のビデオを通常通りダウンロードしてください。
 
 ## 💡 ソフトウェアプロセスの紹介
 
@@ -245,10 +179,6 @@ VideoCaptioner/
 2. 処理中、タイムライン情報なしでテキストコンテンツのみが大規模言語モデルに送信され、処理のオーバーヘッドが大幅に削減されます。
 
 3. 翻訳段階では、Andrew Ngが提案した「翻訳-反映-翻訳」手法を採用しています。この反復的な最適化方法は、翻訳の正確性を保証します。
-
-## 🤝 貢献ガイドライン
-
-作者は大学3年生で、個人の能力とプロジェクトにはまだ多くの改善の余地があります。プロジェクトは継続的に改善中で、使用中にバグに遭遇した場合は、[Issue](https://github.com/WEIFENG2333/VideoCaptioner/issues)の提出とPull Requestによるプロジェクト改善へのご協力をお願いします。
 
 ## 更新履歴
 
@@ -335,16 +265,3 @@ VideoCaptioner/
 - ソフトウェアメインページにランタイムログのリアルタイム表示を追加
 - ソフトウェア内部機能を統一化し完備
 </details>
-
-## ⭐ Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=WEIFENG2333/VideoCaptioner&type=Date)](https://star-history.com/#WEIFENG2333/VideoCaptioner&Date)
-
-## 💖 作者を支援する
-
-このプロジェクトがお役に立てましたら、Starを付けていただけると幸いです。それが私にとって最大の励みとサポートになります！
-
-<div align="center">
-  <img src="./images/alipay.jpg" alt="Alipayコード" width="30%">
-  <img src="./images/wechat.jpg" alt="WeChatコード" width="30%">
-</div>

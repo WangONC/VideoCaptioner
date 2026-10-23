@@ -1,13 +1,26 @@
-```markdown
 <div align="center">
   <img src="./images/logo.png" alt="VideoCaptioner Logo" width="100">
   <p>卡卡字幕助手</p>
   <h1>VideoCaptioner</h1>
   <p>一款基於大語言模型(LLM)的視頻字幕處理助手，支持語音識別、字幕斷句、優化、翻譯全流程處理</p>
 
-  簡體中文 / [正體中文](./docs/README_TW.md) / [English](./docs/README_EN.md) / [日本語](./docs/README_JA.md)
+  [简体中文](../README.md) / [正體中文](./README_TW.md) / [English](./README_EN.md) / [日本語](./README_JA.md)
   
 </div>
+
+## 本分支與上游的差異
+
+本專案基於 [WEIFENG2333/VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner)，依個人的影片與課程字幕處理需求獨立維護，不保證與上游同步更新。
+
+- 獨立字幕影片合成：使用現有字幕合成影片，無須重新轉錄或翻譯。
+- 轉錄＋斷句流程：僅進行轉錄與斷句，不必繼續最佳化或翻譯。
+- 資料夾遞迴匯入：自動過濾帶有指定輸出前綴的檔案，避免重複處理。
+- 失敗任務重試：任務失敗後可直接重新啟動。
+- TranslateGemma 專門適配，以及字幕格式相容性、快取並行存取與輸出命名等改進。
+
+上游後續也已實作部分相似功能，但具體行為不完全相同。本分支以目前程式碼為準，不代表包含上游最新版的全部功能。
+
+感謝原作者與貢獻者。保留原有版權聲明及 [GPL-3.0 授權條款](../LICENSE)。
 
 ## 📖 項目介紹
 
@@ -31,104 +44,26 @@
 ![頁面預覽](https://h1.appinn.me/file/1731487410170_preview1.png)
 ![頁面預覽](https://h1.appinn.me/file/1731487410832_preview2.png)
 
-## 🧪 測試
-
-全流程處理一個 14 分鐘 1080P 的 [B站英文 TED 視頻](https://www.bilibili.com/video/BV1jT411X7Dz)，調用本地 Whisper 模型進行語音識別，使用 `gpt-4o-mini` 模型優化和翻譯為中文，總共消耗時間約 **3 分鐘**。
-
-根據後台計算，模型優化和翻譯消耗費用不足 ￥0.01（以 OpenAI 官方價格計算）
-
-具體字幕和視頻合成效果的測試結果圖片，請參考 [TED 視頻測試](./docs/test.md)
-
 ## 🚀 快速開始
 
-### Windows 用戶
+本分支目前未提供獨立安裝包；上游發布的安裝包不包含本分支的修改。請從原始碼執行。先安裝 Python、FFmpeg 和 Aria2，並確保外部工具可透過 PATH 存取。
 
-軟體較為輕量，打包大小不足 60M，已集成所有必要環境，下載後可直接運行。
-
-1. 從 [Release](https://github.com/WEIFENG2333/VideoCaptioner/releases) 頁面下載最新版本的可執行程式。或者：[藍奏盤下載](https://wwwm.lanzoue.com/iam1L2n8n3za)
-
-2. 打開安裝包進行安裝
-
-3. （可選）LLM API 配置，選擇是否啟用字幕優化或者字幕翻譯
-
-4. 拖拽視頻檔案到軟體窗口，即可全自動處理
-
-提示：每個步驟均支持單獨處理，均支持檔案拖拽。
-
-<details>
-<summary>MacOS 用戶</summary>
- 
-由於本人缺少 Mac，所以無法測試和打包，暫時無法提供 MacOS 的可執行程式。
-
-Mac 用戶請自行使用下載源碼並安裝 python 依賴運行。（本地 Whisper 功能暫不支持 MacOS）
-
-1. 安裝 ffmpeg 和 Aria2 下載工具
 ```bash
-brew install ffmpeg
-brew install aria2
-brew install python@3.**
-```
-
-2. 克隆項目
-```bash
-git clone https://github.com/WEIFENG2333/VideoCaptioner.git
+git clone https://github.com/WangONC/VideoCaptioner.git
 cd VideoCaptioner
 ```
 
-3. 安裝依賴
-```bash
-python3.** -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+安裝相依套件並啟動：
 
-4. 運行程式
 ```bash
+python -m venv .venv
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# macOS / Linux: source .venv/bin/activate
+python -m pip install -r requirements.txt
 python main.py
 ```
-</details>
 
-<details>
-<summary>Docker 部署（beta）</summary>
-
-目前應用較為簡略，歡迎各位 PR 貢獻。
-
-### 1. 克隆項目
-
-```bash
-git clone https://github.com/WEIFENG2333/VideoCaptioner.git
-cd VideoCaptioner
-```
-
-### 2. 構建鏡像
-
-```bash
-docker build -t video-captioner .
-```
-
-### 3. 運行容器
-
-使用自定義 API 配置運行：
-```bash
-docker run -d \
-  -p 8501:8501 \
-  -v $(pwd)/temp:/app/temp \
-  -e OPENAI_BASE_URL="你的API地址" \
-  -e OPENAI_API_KEY="你的API密鑰" \
-  --name video-captioner \
-  video-captioner
-```
-
-### 4. 訪問應用
-
-打開瀏覽器訪問：`http://localhost:8501`
-
-### 注意事項
-
-- 容器內已預裝 ffmpeg 等必要依賴
-- 如需使用其他模型，請透過環境變數配置
-
-</details>
+在設定中配置語音識別與所需的翻譯服務，再匯入影片或字幕。現有字幕可單獨合成，無須重複轉錄。
 
 ## ✨ 主要功能
 
@@ -163,7 +98,7 @@ docker run -d \
 | 配置項   | 說明 |
 |----------|------|
 | 內置模型 | 軟體內置基礎大語言模型（`gpt-4o-mini`），無需配置即可使用（公益服務不穩定） |
-| API 支持 | 支持標準 OpenAI API 格式。兼容 [SiliconCloud](https://cloud.siliconflow.cn/i/HF95kaoz)、[DeepSeek](https://platform.deepseek.com/) 、 [Ollama](https://ollama.com/blog/openai-compatibility) 等。<br>配置方法請參考[配置文檔](./docs/llm_config.md) |
+| API 支持 | 支持標準 OpenAI API 格式。兼容 [SiliconCloud](https://cloud.siliconflow.cn)、[DeepSeek](https://platform.deepseek.com/) 、 [Ollama](https://ollama.com/blog/openai-compatibility) 等。<br>配置方法請參考[配置文檔](./llm_config.md) |
 
 推薦模型：追求更高質量可選用 `Claude-3.5-sonnet` 或 `gpt-4o`
 
@@ -212,7 +147,7 @@ Whisper 版本有 WhisperCpp 和 fasterWhisper（推薦）兩種，後者效果�
 2. 只能下載較低解析度的視頻；
 3. 網路條件較差時需要驗證；
 
-- 請參考 [Cookie 配置說明](./docs/get_cookies.md) 獲取 Cookie 資訊，並將 cookies.txt 檔案放置到軟體安裝目錄的 `AppData` 目錄下，即可正常下載高品質視頻。
+- 請參考 [Cookie 配置說明](./get_cookies.md) 獲取 Cookie 資訊，並將 cookies.txt 檔案放置到軟體安裝目錄的 `AppData` 目錄下，即可正常下載高品質視頻。
 
 ## 💡 軟體流程介紹
 
@@ -244,10 +179,6 @@ VideoCaptioner/
 2. 在處理過程中，僅向大語言模型發送文本內容，不包含時間軸資訊，這大大降低了處理開銷。
 
 3. 在翻譯環節，我們採用了吳恩達提出的「翻譯-反思-翻譯」方法論。這種迭代優化的方式不僅確保了翻譯的準確性。
-
-## 🤝 貢獻指南
-
-作者是一名大三學生，個人能力和專案都還有許多不足，專案也在不斷完善中，如果在使用過程中遇到 Bug，歡迎提交 [Issue](https://github.com/WEIFENG2333/VideoCaptioner/issues) 與 Pull Request 以幫助改進專案。
 
 ## 更新日誌
 
@@ -334,17 +265,3 @@ VideoCaptioner/
 - 軟體首頁新增運行日誌即時查看
 - 統一和完善軟體內部功能
 </details>
-
-## ⭐ 星標歷史
-
-[![Star History Chart](https://api.star-history.com/svg?repos=WEIFENG2333/VideoCaptioner&type=Date)](https://star-history.com/#WEIFENG2333/VideoCaptioner&Date)
-
-## 💖 支持作者
-
-如果覺得專案對你有幫助，可以給專案點個 Star，這將是對我最大的鼓勵和支持！
-
-<div align="center">
-  <img src="./images/alipay.jpg" alt="支付寶二維碼" width="30%">
-  <img src="./images/wechat.jpg" alt="微信二維碼" width="30%">
-</div>
-```
