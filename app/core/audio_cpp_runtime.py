@@ -111,6 +111,8 @@ def inspect_runtime(config=None, cancel=None):
     result = dict(ready=False, installed=paths['python_path'].is_file(), models_ready=False,
                   message='尚未安装 audio.cpp 环境', device=None)
     if not result['installed']:
+        if platform.system() != 'Windows':
+            result['message'] = 'audio.cpp 自动环境仅提供 Windows x64 二进制；当前系统尚无可用环境（CPU 也不例外）'
         return result
     try:
         manifest = json.loads((paths['repo_path'] / 'videocaptioner-runtime.json').read_text('utf-8'))
@@ -124,11 +126,15 @@ def inspect_runtime(config=None, cancel=None):
             if not path.is_relative_to(paths['repo_path']) or not path.is_file() or _digest(path, cancel) != expected:
                 raise Error('audio.cpp 安装文件不完整或已变更：' + relative)
         check(cancel)
-        devices = command([paths['python_path'], '--list-devices'], cancel=cancel, cwd=paths['repo_path'], timeout=45)
-        vulkan = [line for line in devices.splitlines() if re.match(r'^vulkan:\d+\s', line, re.I)]
-        if not vulkan:
-            raise Error('未检测到 Vulkan 设备，请检查显卡驱动；不会自动回退 CPU')
-        result.update(ready=True, device=vulkan[0], message='audio.cpp Vulkan 设备可用（模型推理待实测）')
+        if (config or {}).get('device', 'gpu') == 'cpu':
+            command([paths['python_path'], '--help'], cancel=cancel, cwd=paths['repo_path'], timeout=45)
+            result.update(ready=True, device='cpu', message='audio.cpp CLI 检查通过，已明确选择 CPU（模型推理待实测）')
+        else:
+            devices = command([paths['python_path'], '--list-devices'], cancel=cancel, cwd=paths['repo_path'], timeout=45)
+            vulkan = [line for line in devices.splitlines() if re.match(r'^vulkan:\d+\s', line, re.I)]
+            if not vulkan:
+                raise Error('未检测到 Vulkan 设备，请检查显卡驱动；不会自动回退 CPU')
+            result.update(ready=True, device=vulkan[0], message='audio.cpp Vulkan 设备可用（模型推理待实测）')
         result['models_ready'] = models_ready(config, cancel)
     except Exception as error:
         # Cancellation must stop callers, not become a successful check result.
@@ -140,7 +146,7 @@ def inspect_runtime(config=None, cancel=None):
 def prepare_runtime(progress, cancel, config=None):
     Error, fetch, extract, _, check = _helpers()
     if platform.system() != 'Windows' or platform.machine().lower() not in ('amd64', 'x86_64'):
-        raise Error('audio.cpp 自动安装目前仅支持 Windows x64 Vulkan')
+        raise Error('audio.cpp 自动安装目前仅支持 Windows x64（CPU / Vulkan），不提供当前系统的构建')
     paths = _paths(config)
     if paths != _paths(dict(model_id=(config or {}).get('model_id', 'indextts2'))):
         raise Error('自动安装仅写入受管 audio.cpp 目录')

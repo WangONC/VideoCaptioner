@@ -303,9 +303,6 @@ class BatchProcessInterface(QWidget):
 
         # 文件名
         file_name = QTableWidgetItem(os.path.basename(file_path))
-        if self.dubbing_requested():
-            subtitle = "流程生成字幕" if self.task_type_combo.currentText() == str(BatchTaskType.FULL_PROCESS) else "未选择字幕"
-            file_name.setText(f"{os.path.basename(file_path)}  /  {subtitle}  /  使用配音设置")
         file_name.setToolTip(file_path)
         self.task_table.setItem(row, 0, file_name)
 
@@ -561,7 +558,7 @@ class BatchProcessInterface(QWidget):
         requested = self.dubbing_requested()
         self.start_all_btn.setEnabled(True)
         self.start_all_btn.setText('开始处理')
-        self.task_table.setHorizontalHeaderLabels(['视频 / 字幕 / 参考声音' if requested else '文件名', '进度', '状态'])
+        self.task_table.setHorizontalHeaderLabels(['文件名', '进度', '状态'])
 
     def edit_dubbing_association(self, file_path):
         active = self.batch_thread.current_tasks.get(file_path)
@@ -576,9 +573,7 @@ class BatchProcessInterface(QWidget):
             for row in range(self.task_table.rowCount()):
                 item = self.task_table.item(row, 0)
                 if item.toolTip() == file_path:
-                    subtitle = os.path.basename(value['subtitle']) if value['subtitle'] else ('流程生成字幕' if dialog.generated_subtitles else '未选择字幕')
-                    reference = os.path.basename(value['reference']) if value['reference'] else '使用配音设置'
-                    item.setText(f'{os.path.basename(file_path)}  /  {subtitle}  /  {reference}')
+                    item.setText(os.path.basename(file_path))
 
     def apply_shared_settings(self, value):
         self.dubbing_settings = dict(value)

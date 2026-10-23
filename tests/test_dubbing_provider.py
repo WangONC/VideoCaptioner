@@ -5,12 +5,14 @@ import tempfile
 import unittest
 from app.core.dubbing import DubbingError, IndexTTS2Provider
 
+FAKE_TORCH = "from types import SimpleNamespace\n__version__='fake'\nversion=SimpleNamespace(hip=None,cuda='test')\nfloat16='float16'\ndevice=lambda d:d\nclass Tensor:\n def __add__(self,other):return self\n def sum(self):return self\n def item(self):return 16\ndef ones(n,device):\n assert device=='cuda:0'\n return Tensor()\nclass Cuda:\n def is_available(self):return True\n def device_count(self):return 1\n def get_device_properties(self,n):return SimpleNamespace(name='Fake GPU',total_memory=16)\n def set_device(self,n):assert n in (0,'cuda:0')\n def synchronize(self,n):assert n==0\ncuda=Cuda()\n"
+
 class ProviderTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.root=Path(self.temp.name)
         self.repo=self.root/'repo'; self.repo.mkdir()
         (self.repo/'indextts').mkdir(); (self.repo/'indextts/__init__.py').write_text('')
-        (self.repo/'torch.py').write_text('class Cuda:\n def is_available(self): return True\n def get_device_name(self, n): return "Fake GPU"\ncuda=Cuda()\nclass Version: hip=None\nversion=Version()\n')
+        (self.repo/'torch.py').write_text(FAKE_TORCH)
         (self.repo/'indextts/infer_v2.py').write_text('''import wave
 from pathlib import Path
 class IndexTTS2:
@@ -32,8 +34,8 @@ class IndexTTS2:
         self.assertEqual((self.repo/'starts.txt').read_text(),'start\n')
         self.assertTrue((self.root/'two.wav').exists())
     def test_gpu_refusal(self):
-        (self.repo/'torch.py').write_text('class Cuda:\n def is_available(self): return False\ncuda=Cuda()\n')
-        with self.assertRaisesRegex(DubbingError,'CPU fallback is disabled'):
+        (self.repo/'torch.py').write_text(FAKE_TORCH.replace('def is_available(self):return True', 'def is_available(self):return False'))
+        with self.assertRaisesRegex(DubbingError,'不会回退 CPU'):
             self.provider.synthesize('你好','unused.wav',str(self.root/'one.wav'))
     def test_model_fingerprint_changes(self):
         first=self.provider.fingerprint()
@@ -41,7 +43,6 @@ class IndexTTS2:
         other=IndexTTS2Provider(sys.executable,str(self.repo),str(self.models))
         self.assertNotEqual(first,other.fingerprint())
 
-if __name__=='__main__': unittest.main()
 
 class QwenProviderTests(unittest.TestCase):
     def test_qwen_worker_reuses_voice_prompt(self):
@@ -49,7 +50,7 @@ class QwenProviderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);repo=root/'repo';repo.mkdir();models=root/'models';models.mkdir()
             (models/'config.json').write_text('{}')
-            (repo/'torch.py').write_text('class Cuda:\n def is_available(self):return True\n def get_device_name(self,n):return "Fake"\ncuda=Cuda()\nclass Version:hip=None\nversion=Version()\nfloat16="float16"\n')
+            (repo/'torch.py').write_text(FAKE_TORCH)
             (repo/'qwen_tts').mkdir()
             (repo/'qwen_tts/__init__.py').write_text('''class Qwen3TTSModel:
  @classmethod
@@ -76,3 +77,27 @@ def write(path,data,rate,subtype=None):
                 self.assertEqual((repo/'prompts.txt').read_text(),'once\n')
                 self.assertTrue((root/'b.wav').exists())
             finally:provider.close()
+
+class VenvLauncherTests(unittest.TestCase):
+    def test_real_venv_worker_keeps_launcher_not_base_symlink(self):
+        """A module present only inside venv must import in the actual worker."""
+        import subprocess
+        import os
+        import venv
+        from app.core.dubbing.provider import create_provider
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            venv.EnvBuilder(with_pip=False).create(root/'runtime')
+            python = root/'runtime'/('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+            site = Path(subprocess.check_output([str(python), '-c', 'import sysconfig; print(sysconfig.get_path("purelib"))'], text=True).strip())
+            (site/'edge_tts.py').write_text('# isolated fixture; no global install\n')
+            repo = root/'source';repo.mkdir()
+            provider = create_provider('edge-tts', str(python), str(repo), str(root/'models'))
+            self.assertEqual(provider.python, python.absolute())
+            try:
+                provider._start()
+                self.assertEqual(provider._receive(None)['backend'], 'online')
+            finally:
+                provider.close()
+
+if __name__ == "__main__": unittest.main()

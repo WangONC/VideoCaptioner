@@ -27,10 +27,12 @@ class IndexTTS2Provider:
     def __init__(self, python_path, repo_path, model_dir, timeout=1200, engine="indextts2"):
         if not all((python_path, repo_path, model_dir)):
             raise DubbingError('请先配置独立配音环境与模型目录')
-        if engine not in SOURCE_FILES: raise DubbingError('Unknown TTS engine')
+        if engine not in SOURCE_FILES: raise DubbingError('未知配音引擎')
         self.engine=engine
+        self.device = 'gpu'
         self.reference_text=''
-        self.python = Path(python_path).expanduser().resolve()
+        # Preserve venv launcher symlinks; resolving executes the base interpreter.
+        self.python = Path(python_path).expanduser().absolute()
         self.repo = Path(repo_path).expanduser().resolve()
         self.models = Path(model_dir).expanduser().resolve()
         source = SOURCE_FILES[engine]
@@ -74,8 +76,8 @@ class IndexTTS2Provider:
                 digest.update(self._file_hash(adapter).encode())
             self._fingerprint = {'provider': self.engine+('-online-v1' if self.engine == 'edge-tts' else '-offline-v2'), 'runtime': str(self.python),
                                  'runtime_mtime_ns': self.python.stat().st_mtime_ns,
-                                 'models_and_code_sha256': digest.hexdigest(), 'fp16': self.engine != 'edge-tts',
-                                 'cuda_kernel': False, 'deepspeed': False, 'options': dict(self.options)}
+                                 'models_and_code_sha256': digest.hexdigest(), 'fp16': self.engine != 'edge-tts' and self.device != 'cpu',
+                                 'device': self.device, 'cuda_kernel': False, 'deepspeed': False, 'options': dict(self.options)}
             if self.engine == 'qwen3-design':
                 self._voice_identity = hashlib.sha256(json.dumps(self._fingerprint, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
                 self._design_reference_hash = self._read_design_reference_hash()
@@ -100,11 +102,13 @@ class IndexTTS2Provider:
         self.close()
         self._responses = queue.Queue()
         responses = self._responses
-        self._errors = tempfile.TemporaryFile(mode='w+b')
-        env = dict(os.environ, HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_DATASETS_OFFLINE='1',
+        from app.core.tts_runtime import managed_environment
+        env = managed_environment()
+        self._errors = tempfile.TemporaryFile(mode='w+b', dir=env['TMPDIR'])
+        env.update( HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_DATASETS_OFFLINE='1',
                    PYTHONUNBUFFERED='1', PYTHONIOENCODING='utf-8')
         self.process = subprocess.Popen([str(self.python), '-u', str(Path(__file__).with_name('worker.py')),
-                                         '--repo', str(self.repo), '--models', str(self.models), '--engine', self.engine],
+                                         '--repo', str(self.repo), '--models', str(self.models), '--engine', self.engine, '--device', self.device],
                                         cwd=self.repo if self.repo.is_dir() else self.python.parent, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=self._errors, text=True, encoding='utf-8', errors='replace', bufsize=1,
                                         start_new_session=os.name != 'nt',
@@ -117,9 +121,9 @@ class IndexTTS2Provider:
                         try:
                             responses.put(json.loads(line[len(_PREFIX):]))
                         except ValueError:
-                            responses.put({'error': 'Invalid response from TTS worker'})
+                            responses.put({'error': '配音进程返回了无效响应'})
             finally:
-                responses.put({'error': 'TTS worker exited'})
+                responses.put({'error': '配音进程已退出'})
         threading.Thread(target=read, daemon=True).start()
 
     def _receive(self, cancel):
@@ -139,7 +143,7 @@ class IndexTTS2Provider:
                     details = ''
                 raise DubbingError(response['error'] + ('\n' + details if details else ''))
             return response
-        raise DubbingError('TTS worker timed out; completed cue audio remains cached')
+        raise DubbingError('配音响应超时，已完成的音频已保留')
 
     def synthesize(self, text, reference_audio, output_path, cancel_event=None):
         try:
@@ -148,7 +152,7 @@ class IndexTTS2Provider:
                 self._start()
                 ready = self._receive(cancel_event)
                 if not ready.get('ready'):
-                    raise DubbingError('TTS worker did not initialize')
+                    raise DubbingError('配音引擎初始化失败')
             if self.engine == 'qwen3-design':
                 self.fingerprint()
                 identity = self._voice_identity
@@ -163,7 +167,7 @@ class IndexTTS2Provider:
             self.process.stdin.flush()
             result = self._receive(cancel_event)
             if not result.get('ok'):
-                raise DubbingError('TTS worker returned an invalid completion')
+                raise DubbingError('配音引擎未正常完成')
             if self.engine == 'qwen3-design':
                 current_hash = self._read_design_reference_hash()
                 if not current_hash or (self._design_reference_hash and current_hash != self._design_reference_hash):
@@ -205,7 +209,9 @@ class Qwen3TTSProvider(IndexTTS2Provider):
 
 
 def create_provider(model_id, python_path, repo_path, model_dir, *, language='中文',
-                    voice='', description='', seed=-1, style='', ffmpeg='ffmpeg', cancel_event=None):
+                    voice='', description='', seed=-1, style='', ffmpeg='ffmpeg', cancel_event=None, device='gpu'):
+    if device not in ('gpu', 'cpu'):
+        raise DubbingError('无效的运行设备')
     engines = {'indextts2':'indextts2', 'qwen3-0.6b':'qwen3', 'qwen3-1.7b':'qwen3',
         'qwen3-custom':'qwen3-custom', 'qwen3-design':'qwen3-design', 'dots-soar':'dots',
         'dots-mf':'dots', 'cosyvoice3':'cosyvoice3', 'gpt-sovits':'gpt-sovits', 'edge-tts':'edge-tts'}
@@ -223,6 +229,7 @@ def create_provider(model_id, python_path, repo_path, model_dir, *, language='�
         if not valid:
             raise DubbingError('模型清单或文件校验失败，请重新下载完整模型')
     provider = IndexTTS2Provider(python_path, repo_path, model_dir, engine=engines[model_id])
+    provider.device = device
     provider.cancel_event = cancel_event
     provider.options = dict(language=language, voice=voice, description=description,
                             seed=int(seed), ffmpeg=str(ffmpeg), model_id=model_id)

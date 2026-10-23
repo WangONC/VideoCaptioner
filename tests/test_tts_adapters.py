@@ -32,7 +32,7 @@ class AdapterContracts(unittest.TestCase):
                 wav.setparams((1,2,rate,0,'NONE','not compressed'));wav.writeframes(b'\0\0'*len(audio))
         with tempfile.TemporaryDirectory() as folder, patch.dict(sys.modules, {
             'soundfile': types.SimpleNamespace(write=write),
-            'torch': types.SimpleNamespace(float16='fp16',cuda=types.SimpleNamespace(empty_cache=lambda:None)),
+            'torch': types.SimpleNamespace(float16='fp16',device=lambda value:value,cuda=types.SimpleNamespace(empty_cache=lambda:None,set_device=lambda value:None)),
             'qwen_tts': types.SimpleNamespace(Qwen3TTSModel=Model)}):
             (Path(folder)/'voice_clone_base').mkdir()
             (Path(folder)/'voice_clone_base/config.json').write_text('{}')
@@ -61,7 +61,7 @@ class AdapterContracts(unittest.TestCase):
                 calls.append(kw); return dict(audio=[0.0]*240, sample_rate=24000)
         with tempfile.TemporaryDirectory() as folder, patch.dict(sys.modules, {
             'soundfile': types.SimpleNamespace(write=lambda *a, **k: None),
-            'torch':types.SimpleNamespace(float16='fp16'),
+            'torch':types.SimpleNamespace(float16='fp16',device=lambda value:value,cuda=types.SimpleNamespace(set_device=lambda value:None)),
             'dots_tts.runtime':types.SimpleNamespace(DotsTtsRuntime=Runtime)}):
             adapter = StandardAdapter('dots',folder,folder)
             adapter.synthesize(dict(text='你好',reference_audio='ref.wav',reference_text='原文',
@@ -97,6 +97,23 @@ class AdapterContracts(unittest.TestCase):
                     self.assertEqual(wav.getframerate(),24000)
                     self.assertEqual(wav.getnchannels(),1)
                     self.assertGreater(wav.getnframes(),0)
+
+    def test_edge_adds_system_trust_without_disabling_tls(self):
+        import ssl
+        context = ssl.create_default_context()
+        original_count = context.cert_store_stats()['x509_ca']
+        edge = types.SimpleNamespace(voices=types.SimpleNamespace(_SSL_CTX=context),
+                                     communicate=types.SimpleNamespace(_SSL_CTX=context))
+        with patch.dict(sys.modules, {'edge_tts': edge}):
+            StandardAdapter('edge-tts', '.', '.')
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertGreaterEqual(context.cert_store_stats()['x509_ca'], original_count)
+        insecure = ssl._create_unverified_context()
+        edge.voices._SSL_CTX = insecure
+        with patch.dict(sys.modules, {'edge_tts': edge}):
+            with self.assertRaisesRegex(RuntimeError, 'TLS'):
+                StandardAdapter('edge-tts', '.', '.')
 
     def test_edge_provider_does_not_require_local_weights(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -143,13 +160,34 @@ class AdapterContracts(unittest.TestCase):
             self.assertEqual(check.stdout.strip(),'1')
             repo=root/'repo'; repo.mkdir(); (repo/'indextts').mkdir()
             (repo/'indextts/__init__.py').write_text('')
-            (repo/'torch.py').write_text('class Cuda:\n def is_available(self):return True\n def get_device_name(self,n):return "Fake"\ncuda=Cuda()\nclass V:hip=None\nversion=V()\n')
-            (repo/'indextts/infer_v2.py').write_text('class IndexTTS2:\n def __init__(self,**kw):pass\n def infer(self,**kw):pass\n')
+            (repo/'torch.py').write_text("""from types import SimpleNamespace
+__version__='test'
+version=SimpleNamespace(hip='7.2',cuda=None)
+device=lambda value:value
+class Tensor:
+ def __add__(self,other):return self
+ def sum(self):return self
+ def item(self):return 16
+def ones(n,device):
+ assert device=='cuda:1'
+ return Tensor()
+class Cuda:
+ def is_available(self):return True
+ def device_count(self):return 2
+ def get_device_properties(self,n):
+  return SimpleNamespace(name='AMD Radeon RX 9070 XT' if n else 'AMD Radeon Graphics',gcnArchName='gfx1201' if n else 'gfx1151',total_memory=16 if n else 2)
+ def set_device(self,n):assert n in (1,'cuda:1')
+ def synchronize(self,n):assert n==1
+cuda=Cuda()
+""")
+            (repo/'indextts/infer_v2.py').write_text('class IndexTTS2:\n def __init__(self,**kw):assert kw["device"]=="cuda:1"\n def infer(self,**kw):pass\n')
             run=subprocess.run([str(python),str(Path(worker.__file__).resolve()),'--repo',str(repo),
                 '--models',str(root),'--engine','indextts2'],input='',stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,text=True,timeout=10)
             self.assertEqual(run.returncode,0,run.stderr+run.stdout)
-            self.assertTrue(json.loads(run.stdout.split('DUBBING_JSON:')[1])['ready'])
+            result=json.loads(run.stdout.split('DUBBING_JSON:')[1])
+            self.assertTrue(result['ready'])
+            self.assertEqual(result['gpu']['device'],'cuda:1')
 
     def test_design_fingerprint_binds_reference_and_rejects_midjob_damage(self):
         import hashlib

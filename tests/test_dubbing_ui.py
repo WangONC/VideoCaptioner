@@ -115,7 +115,7 @@ class DubbingUiTests(unittest.TestCase):
         dialog = DubbingModelDialog(self.host, self.page)
         with patch.object(self.page, 'start_setup') as start:
             dialog.start_operation('models', 'qwen3-1.7b')
-            start.assert_called_once_with('prepare', model_id='qwen3-1.7b')
+            start.assert_called_once_with('models', model_id='qwen3-1.7b')
         self.assertEqual(self.page.model_id, 'indextts2')
 
     def test_busy_environment_does_not_start_duplicate(self):
@@ -135,7 +135,8 @@ class DubbingUiTests(unittest.TestCase):
         self.page.job = None
 
     def test_model_download_failure_does_not_mark_working_environment_broken(self):
-        self.page.job = SimpleNamespace(operation='prepare', runtime_ready=True,
+        self.page.environment_checks[self.page.environment_key('qwen3-0.6b')] = (True, '运行环境可用')
+        self.page.job = SimpleNamespace(operation='models', runtime_ready=False,
             cancel_event=threading.Event(), config={'model_id': 'qwen3-0.6b'})
         self.page.on_failure('模型下载网络错误')
         self.assertEqual(self.page.environment_state('qwen3-1.7b')['label'], '可用')

@@ -18,7 +18,12 @@ def main():
     parser.add_argument('--repo', required=True)
     parser.add_argument('--models', required=True)
     parser.add_argument('--engine', choices=ENGINES, default='indextts2')
+    parser.add_argument('--device', choices=('gpu', 'cpu'), default='gpu')
     args = parser.parse_args()
+    if args.device == 'cpu':
+        # Explicit CPU request, before importing torch or any engine. Some
+        # upstream runtimes otherwise auto-select CUDA despite our setting.
+        os.environ.update(CUDA_VISIBLE_DEVICES='-1', HIP_VISIBLE_DEVICES='-1', ROCR_VISIBLE_DEVICES='-1')
     protocol = sys.stdout
     def emit(value):
         protocol.write('DUBBING_JSON:' + json.dumps(value, ensure_ascii=False) + '\n')
@@ -39,6 +44,7 @@ def main():
         # Windows embeddable Python's ._pth omits the executed script directory.
         # Explicitly expose only our worker's sibling adapters.
         sys.path.insert(0, str(Path(__file__).resolve().parent))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         repo = Path(args.repo).resolve()
         if args.engine in ('indextts2', 'gpt-sovits'):
             os.environ['NLTK_DATA'] = str(repo / '.nltk_data')
@@ -46,17 +52,18 @@ def main():
         with contextlib.redirect_stdout(sys.stderr):
             if args.engine != 'edge-tts':
                 import torch
-                if not torch.cuda.is_available():
-                    raise RuntimeError('No supported GPU runtime detected. CUDA or compatible ROCm PyTorch is required; CPU fallback is disabled.')
+                from tts_gpu import select_device
+                gpu = select_device(args.device, torch)
             if args.engine in ('cosyvoice3', 'gpt-sovits'):
                 from adapter_cosy_gpt import create_adapter
-                adapter = create_adapter(args.engine, args.models, args.repo)
+                adapter = create_adapter(args.engine, args.models, args.repo, device=gpu['device'])
             else:
                 from adapter_standard import StandardAdapter
-                adapter = StandardAdapter(args.engine, args.models, args.repo)
+                adapter = StandardAdapter(args.engine, args.models, args.repo,
+                    device=None if args.engine == 'edge-tts' else gpu['device'])
         info = {'ready': True, 'backend': 'online', 'device': None}
         if args.engine != 'edge-tts':
-            info.update(backend='rocm' if torch.version.hip else 'cuda', device=torch.cuda.get_device_name(0))
+            info.update(backend=gpu['backend'], device=gpu['name'], gpu=gpu)
         emit(info)
         for line in sys.stdin:
             try:

@@ -91,7 +91,7 @@ class PipelineTests(unittest.TestCase):
         second=FakeProvider(); DubbingPipeline(self.config,second).run(); self.assertEqual(second.calls,[])
         self.config.output_path=str(self.root/'changed.mp4')
         changed=FakeProvider(version=2); DubbingPipeline(self.config,changed).run(); self.assertEqual(len(changed.calls),2)
-        self.assertEqual(progress[-1],(2,2,'Dubbing complete'))
+        self.assertEqual(progress[-1],(2,2,'配音完成'))
     def test_speed_limit_preserves_existing_output(self):
         Path(self.config.output_path).write_bytes(b'existing')
         with self.assertRaisesRegex(DubbingError,'already exists'):

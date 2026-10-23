@@ -1,14 +1,14 @@
 """Download identities and adapter families, not claims of GPU qualification."""
 MODELS = {
-    'indextts2': dict(name='IndexTTS2', download_size='7.66 GB', engine='indextts2', folder='IndexTTS-2', repo='IndexTeam/IndexTTS-2'),
-    'qwen3-0.6b': dict(name='Qwen3-TTS · 0.6B Base', download_size='2.52 GB', engine='qwen3', folder='Qwen3-TTS-12Hz-0.6B-Base', repo='Qwen/Qwen3-TTS-12Hz-0.6B-Base'),
-    'qwen3-1.7b': dict(name='Qwen3-TTS · 1.7B Base', download_size='4.54 GB', engine='qwen3', folder='Qwen3-TTS-12Hz-1.7B-Base', repo='Qwen/Qwen3-TTS-12Hz-1.7B-Base'),
-    'qwen3-custom': dict(name='Qwen3-TTS · 1.7B CustomVoice', download_size='按模型清单', engine='qwen3', folder='Qwen3-TTS-12Hz-1.7B-CustomVoice', repo='Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice'),
-    'qwen3-design': dict(name='Qwen3-TTS · 1.7B VoiceDesign', download_size='按模型清单', engine='qwen3', folder='Qwen3-TTS-12Hz-1.7B-VoiceDesign', repo='Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign'),
-    'dots-soar': dict(name='dots.tts · SOAR', download_size='按模型清单', engine='dots', folder='dots.tts-soar', repo='dots-studio/dots.tts-soar'),
-    'dots-mf': dict(name='dots.tts · MF', download_size='按模型清单', engine='dots', folder='dots.tts-mf', repo='dots-studio/dots.tts-mf'),
-    'cosyvoice3': dict(name='CosyVoice3', download_size='按模型清单', engine='cosyvoice3', folder='Fun-CosyVoice3-0.5B-2512', repo='FunAudioLLM/Fun-CosyVoice3-0.5B-2512'),
-    'gpt-sovits': dict(name='GPT-SoVITS · v2', download_size='按模型清单', engine='gpt-sovits', folder='GPT-SoVITS-v2', repo='lj1995/GPT-SoVITS'),
+    'indextts2': dict(name='IndexTTS2', download_size='未知', engine='indextts2', folder='IndexTTS-2', repo='IndexTeam/IndexTTS-2'),
+    'qwen3-0.6b': dict(name='Qwen3-TTS · 0.6B Base', download_size='未知', engine='qwen3', folder='Qwen3-TTS-12Hz-0.6B-Base', repo='Qwen/Qwen3-TTS-12Hz-0.6B-Base'),
+    'qwen3-1.7b': dict(name='Qwen3-TTS · 1.7B Base', download_size='未知', engine='qwen3', folder='Qwen3-TTS-12Hz-1.7B-Base', repo='Qwen/Qwen3-TTS-12Hz-1.7B-Base'),
+    'qwen3-custom': dict(name='Qwen3-TTS · 1.7B CustomVoice', download_size='未知', engine='qwen3', folder='Qwen3-TTS-12Hz-1.7B-CustomVoice', repo='Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice'),
+    'qwen3-design': dict(name='Qwen3-TTS · 1.7B VoiceDesign', download_size='未知', engine='qwen3', folder='Qwen3-TTS-12Hz-1.7B-VoiceDesign', repo='Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign'),
+    'dots-soar': dict(name='dots.tts · SOAR', download_size='未知', engine='dots', folder='dots.tts-soar', repo='dots-studio/dots.tts-soar'),
+    'dots-mf': dict(name='dots.tts · MF', download_size='未知', engine='dots', folder='dots.tts-mf', repo='dots-studio/dots.tts-mf'),
+    'cosyvoice3': dict(name='CosyVoice3', download_size='未知', engine='cosyvoice3', folder='Fun-CosyVoice3-0.5B-2512', repo='FunAudioLLM/Fun-CosyVoice3-0.5B-2512'),
+    'gpt-sovits': dict(name='GPT-SoVITS · v2', download_size='未知', engine='gpt-sovits', folder='GPT-SoVITS-v2', repo='lj1995/GPT-SoVITS'),
     'edge-tts': dict(name='Edge TTS · 在线', download_size='无需模型', engine='edge-tts', folder='edge-tts', repo=None),
 }
 

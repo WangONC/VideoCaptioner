@@ -10,21 +10,35 @@ from .pipeline import DubbingConfig, DubbingPipeline, DubbingError, parse_srt, _
 
 # Selected backend is shared with the model dialog; unsupported backends fail closed.
 backend_choices = {}
+device_choices = {}
 _execution_lock = threading.Lock()
 
 
-def runtime_paths(model_id, backend=None):
+def runtime_paths(model_id, backend=None, device=None):
     backend = backend or backend_choices.get(model_id, 'pytorch')
     if backend == 'audio.cpp':
         from app.core.audio_cpp_runtime import default_paths
         return default_paths(model_id)
     from app.core.tts_runtime import default_paths
     from app.config import APPDATA_PATH
-    paths = default_paths(model_id)
+    device = device or device_choices.get(model_id, 'gpu')
+    paths = default_paths(model_id, device=device)
     name = 'dubbing-runtime.json' if model_id == 'indextts2' else 'dubbing-runtime-' + model_id + '.json'
     try:
         saved = json.loads((APPDATA_PATH / name).read_text('utf-8'))
-        paths.update({key: str(saved[key]) for key in paths if saved.get(key)})
+        # Migrate only the tool's exact legacy default paths. Custom external
+        # environments are retained; neither old files nor config are deleted.
+        from app.core.tts_catalog import MODELS
+        legacy = APPDATA_PATH / 'tts' / MODELS[model_id]['engine']
+        old_defaults = dict(python_path=legacy / 'runtime' / 'python.exe', repo_path=legacy / 'source')
+        migrate_legacy = all(not saved.get(key) or Path(saved[key]).absolute() == value.absolute()
+                             for key, value in old_defaults.items())
+        for key in paths:
+            if not saved.get(key):
+                continue
+            if migrate_legacy and key in old_defaults:
+                continue
+            paths[key] = str(saved[key])
     except (OSError, ValueError, AttributeError):
         pass
     return paths
@@ -53,10 +67,13 @@ class DubbingRequest:
 
 
 def build_request(video, subtitle, output, settings, *, runtime=None, association=None,
-                  output_mode=None, subtitle_mode='none', cache_dir=None):
+                  output_mode=None, subtitle_mode='none', cache_dir=None, device=None):
     from .settings import normalized, executable, validation_error
     from app.config import CACHE_PATH
     value = normalized(settings)
+    device = device or device_choices.get(value['model_id'], 'gpu')
+    if device not in ('gpu', 'cpu'):
+        raise DubbingError('无效的运行设备')
     association = dict(association or {})
     subtitle = association.get('subtitle') or subtitle
     if association.get('reference') and value['source'] in ('原视频声音', '参考音频'):
@@ -96,13 +113,13 @@ def build_request(video, subtitle, output, settings, *, runtime=None, associatio
     config = DubbingConfig(video_path=str(video), srt_path=str(subtitle), output_path=str(output),
         cache_dir=str(cache_dir or CACHE_PATH / 'dubbing'), model_id=value['model_id'],
         reference_audio=reference, reference_text=value['reference_text'] or None,
-        backend=backend, language=value['language'], voice=value['voice'], description=value['description'],
+        backend=backend, device=device, language=value['language'], voice=value['voice'], description=value['description'],
         seed=int(value['seed']) if value['model_id'] in ('dots-soar', 'dots-mf', 'gpt-sovits') else -1,
         alignment='natural' if value['alignment'] == '自然语速' else 'subtitle',
         overflow='keep' if value['overflow'] == '保留超限音频' else 'stop',
         max_speedup=float(value['max_speedup']), speed=float(value['speed']), output_mode=mode,
         original='separate' if value['original'] == '保留为独立音轨' else 'replace',
-        **(runtime if runtime is not None else runtime_paths(value['model_id'])))
+        **(runtime if runtime is not None else runtime_paths(value['model_id'], device=device)))
     return DubbingRequest(tuple(asdict(config).items()), text, subtitle_mode)
 
 

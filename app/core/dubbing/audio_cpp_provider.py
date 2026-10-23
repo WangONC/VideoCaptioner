@@ -31,6 +31,7 @@ def create_provider(config, cancel_event=None):
     if config.model_id == 'qwen3-design':
         return DesignedAudioCppProvider(config, cancel_event)
     provider = AudioCppProvider(config.python_path, config.model_dir, config.model_id,
+        compute_backend='cpu' if getattr(config, 'device', 'gpu') == 'cpu' else 'vulkan',
                                 language=getattr(config, 'language', '中文'),
                                 voice=getattr(config, 'voice', ''),
                                 description=getattr(config, 'description', ''),
@@ -186,7 +187,9 @@ class AudioCppProvider:
                        '--mode', 'offline', '--language', self.language, '--request-sequence', str(sequence),
                        '--out-dir', str(stage), '--out-format', 'pcm16']
             # No shell is involved; text and reference transcript live in JSON.
-            env = dict(os.environ, HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
+            from app.core.tts_runtime import managed_environment
+            env = managed_environment()
+            env.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
             self._run_command(command, env, cancel_event)
             generated = stage / 'cue.wav'
             self._validate_wav(generated)
@@ -202,7 +205,7 @@ class AudioCppProvider:
                 raise DubbingError('Cannot publish WAV without overwriting files: ' + str(error)) from error
 
     def _run_command(self, command, env, cancel_event):
-        with tempfile.TemporaryFile(mode='w+b') as log:
+        with tempfile.TemporaryFile(mode='w+b', dir=env.get('TMPDIR')) as log:
             try:
                 try:
                     self.process = subprocess.Popen(command, cwd=self.executable.parent,
@@ -257,9 +260,11 @@ class DesignedAudioCppProvider:
         if self.language not in self._PROMPTS:
             raise DubbingError('Unsupported language for the designed reference voice')
         self.designer = AudioCppProvider(config.python_path, config.model_dir, 'qwen3-design',
-            language=config.language, description=config.description, seed=config.seed)
+            language=config.language, description=config.description, seed=config.seed,
+            compute_backend='cpu' if getattr(config, 'device', 'gpu') == 'cpu' else 'vulkan')
         self.cloner = AudioCppProvider(config.python_path, config.model_dir, 'qwen3-1.7b',
-            language=config.language, seed=config.seed)
+            language=config.language, seed=config.seed,
+            compute_backend='cpu' if getattr(config, 'device', 'gpu') == 'cpu' else 'vulkan')
         self.designer.cancel_event = self.cloner.cancel_event = cancel_event
         self.prompt_text = self._PROMPTS[self.language]
         self.cloner.reference_text = self.prompt_text

@@ -1,12 +1,22 @@
 """Dubbing model/environment management using the transcription dialog widgets."""
 from pathlib import Path
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QUrl
+from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QTableWidgetItem, QWidget, QHeaderView
 from qfluentwidgets import (BodyLabel, ComboBox, FluentIcon, HyperlinkButton,
                             MessageBoxBase, ProgressBar, PushButton, SubtitleLabel)
 from app.components.WhisperCppSettingWidget import WhisperCppDownloadDialog
 from app.core.tts_catalog import MODELS
+
+
+def concise_status(message, fallback='正在安装依赖'):
+    """Keep package/process diagnostics in the existing log, not in page copy."""
+    message = str(message)
+    from app.core.utils.logger import setup_logger
+    setup_logger('dubbing').info(message)
+    line = message.splitlines()[0] if message else ''
+    return line[:120] if any('\u4e00' <= c <= '\u9fff' for c in line) else fallback
 
 
 class DubbingEnvironmentDialog(MessageBoxBase):
@@ -24,16 +34,24 @@ class DubbingEnvironmentDialog(MessageBoxBase):
         controls = QHBoxLayout()
         self.program_combo = ComboBox(self)
         self.program_combo.setFixedWidth(300)
-        self.program_combo.addItem('Edge TTS（在线）' if model_id == 'edge-tts' else '官方 PyTorch（自动适配 GPU）', userData='pytorch')
+        self.program_combo.addItem('Edge TTS（在线）' if model_id == 'edge-tts' else '官方 PyTorch', userData='pytorch')
         from app.core.audio_cpp_runtime import AUDIO_CPP_MODELS
         if model_id in AUDIO_CPP_MODELS:
             self.program_combo.addItem('audio.cpp', userData='audio.cpp')
         self.program_combo.setCurrentIndex(self.program_combo.findData(page.backend_for_model(model_id)))
         self.program_combo.currentIndexChanged.connect(self.backend_changed)
         self.program_combo.setToolTip('选择推理后端')
+        self.device_combo = ComboBox(self)
+        self.device_combo.addItem('GPU', userData='gpu')
+        self.device_combo.addItem('CPU', userData='cpu')
+        self.device_combo.setCurrentIndex(self.device_combo.findData(page.device_for_model(model_id)))
+        self.device_combo.currentIndexChanged.connect(self.device_changed)
+        self.device_combo.setVisible(model_id != 'edge-tts')
+        self.device_combo.setToolTip('明确选择运行设备；GPU 失败不会自动回退 CPU')
         self.program_download_btn = PushButton('下载环境', self)
         self.program_download_btn.clicked.connect(self.start_operation)
         controls.addWidget(self.program_combo)
+        controls.addWidget(self.device_combo)
         controls.addWidget(self.program_download_btn)
         controls.addStretch()
         layout.addLayout(controls)
@@ -50,16 +68,34 @@ class DubbingEnvironmentDialog(MessageBoxBase):
         self.page.setup_finished.connect(self.refresh_status)
         self.refresh_status()
 
+    def clear_progress(self):
+        self.progress_label.clear()
+        self.progress_label.hide()
+        self.progress_bar.setValue(0)
+        self.progress_bar.hide()
+
+    def device_changed(self):
+        if self.page.job is not None:
+            return
+        self.clear_progress()
+        self.page.set_device(self.model_id, self.device_combo.currentData())
+        self.refresh_status()
+
     def backend_changed(self):
+        if self.page.job is not None:
+            return
+        self.clear_progress()
         self.page.set_backend(self.model_id, self.program_combo.currentData())
         self.refresh_status()
 
     def refresh_status(self):
         state = self.page.environment_state(self.model_id)
-        self.status_label.setText(state['message'])
+        self.status_label.setText(concise_status(state['message'], '请查看日志'))
+        self.status_label.setToolTip(state['message'])
         self.program_download_btn.setText('检查环境' if state['installed'] else '下载环境')
         self.program_download_btn.setEnabled(self.page.job is None)
         self.program_combo.setEnabled(self.page.job is None)
+        self.device_combo.setEnabled(self.page.job is None)
 
     def start_operation(self):
         if self.page.job is not None:
@@ -74,13 +110,14 @@ class DubbingEnvironmentDialog(MessageBoxBase):
         self.progress_label.setText('正在检查环境…' if state['installed'] else '正在准备运行环境…')
         self.program_download_btn.setEnabled(False)
         self.program_combo.setEnabled(False)
+        self.device_combo.setEnabled(False)
         job.progress.connect(self.update_progress)
-        job.succeeded.connect(self.progress_label.setText)
-        job.failed.connect(self.progress_label.setText)
+        job.succeeded.connect(lambda text: self.progress_label.setText(concise_status(text, '已完成')))
+        job.failed.connect(lambda text: self.progress_label.setText(concise_status(text, '操作失败，请查看日志')))
 
     def update_progress(self, value, message):
         self.progress_bar.setValue(value)
-        self.progress_label.setText(message)
+        self.progress_label.setText(concise_status(message))
 
     def reject(self):
         if self.page.job and self.page.job.operation in ('runtime', 'check_runtime'):
@@ -129,7 +166,8 @@ class DubbingModelDialog(WhisperCppDownloadDialog):
             layout.setContentsMargins(4, 4, 4, 4)
             button = HyperlinkButton('', '检查' if downloaded else '下载', self)
             button.setIcon(FluentIcon.DOWNLOAD)
-            button.clicked.connect(lambda checked=False, key=model_id: self.start_operation('models', key))
+            operation = 'check_runtime' if model_id == 'edge-tts' else 'check_models' if downloaded else 'models'
+            button.clicked.connect(lambda checked=False, key=model_id, op=operation: self.start_operation(op, key))
             layout.addStretch()
             layout.addWidget(button)
             layout.addStretch()
@@ -152,6 +190,13 @@ class DubbingModelDialog(WhisperCppDownloadDialog):
             self.model_table.setCellWidget(row, 4, environment)
         self._set_all_download_buttons_enabled(self.page.job is None)
 
+    def _open_model_folder(self):
+        row = self.model_table.currentRow()
+        model_id = list(MODELS)[row] if row >= 0 else self.page.model_id
+        path = Path(self.page.paths_for_model(model_id)['model_dir'])
+        path.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+
     def open_environment(self, model_id):
         if self.page.job is not None:
             return
@@ -161,20 +206,20 @@ class DubbingModelDialog(WhisperCppDownloadDialog):
     def start_operation(self, operation, model_id=None):
         if self.page.job is not None:
             return
-        self.page.start_setup('prepare', model_id=model_id)
+        self.page.start_setup(operation, model_id=model_id)
         if self.page.job is None:
             return
         self.progress_bar.show()
         self.progress_label.show()
-        self.progress_label.setText('正在准备…')
+        self.progress_label.setText('正在检查…' if operation.startswith('check_') else '正在下载模型…')
         self._set_all_download_buttons_enabled(False)
         self.page.job.progress.connect(self.update_progress)
-        self.page.job.failed.connect(self.progress_label.setText)
-        self.page.job.succeeded.connect(self.progress_label.setText)
+        self.page.job.failed.connect(lambda text: self.progress_label.setText(concise_status(text, '操作失败，请查看日志')))
+        self.page.job.succeeded.connect(lambda text: self.progress_label.setText(concise_status(text, '已完成')))
 
     def update_progress(self, value, message):
         self.progress_bar.setValue(value)
-        self.progress_label.setText(message)
+        self.progress_label.setText(concise_status(message))
 
     def _set_all_download_buttons_enabled(self, enabled):
         for row in range(self.model_table.rowCount()):

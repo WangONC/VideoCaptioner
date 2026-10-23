@@ -132,6 +132,7 @@ class DubbingConfig:
     model_dir: str = None
     max_speedup: float = 1.35
     backend: str = 'pytorch'
+    device: str = 'gpu'
     language: str = '中文'
     voice: str = ''
     description: str = ''
@@ -148,7 +149,7 @@ class DubbingConfig:
 
 def _check(cancel):
     if cancel is not None and cancel.is_set():
-        raise CancelledError('Dubbing cancelled; completed cue audio remains cached')
+        raise CancelledError('已取消配音，已完成的音频已保留')
 
 
 def _run(args, cancel=None, cwd=None):
@@ -235,7 +236,7 @@ class DubbingPipeline:
         input_hash = _hash(video)
         if c.alignment not in ('subtitle', 'natural') or c.overflow not in ('stop', 'keep'):
             raise DubbingError('Unsupported timing settings')
-        progress(0, len(cues), 'Preparing voice')
+        progress(0, len(cues), '正在准备声音')
         with tempfile.TemporaryDirectory(prefix='dubbing-', dir=cache) as workdir:
             work = Path(workdir)
             reference = None
@@ -266,7 +267,7 @@ class DubbingPipeline:
                 else:
                     from .provider import create_provider
                     self.provider = create_provider(c.model_id, c.python_path, c.repo_path, c.model_dir,
-                        language=c.language, voice=c.voice, description=c.description, seed=c.seed, ffmpeg=c.ffmpeg, cancel_event=cancel_event)
+                        language=c.language, voice=c.voice, description=c.description, seed=c.seed, ffmpeg=c.ffmpeg, cancel_event=cancel_event, device=c.device)
             if hasattr(self.provider,'reference_text'):self.provider.reference_text=reference_text
             backend = self.provider.fingerprint()
             timeline = work / 'timeline.wav'
@@ -303,7 +304,7 @@ class DubbingPipeline:
                             except Exception:
                                 if attempt == c.retries:
                                     raise
-                                progress(i, len(cues), f'Retrying cue {cue.index}')
+                                progress(i, len(cues), f'正在重试第 {cue.index} 句')
                     slot = cue.end - cue.start
                     length = _wav_duration(raw)
                     speed = max(1.0, length / c.speed / slot) if c.alignment == 'subtitle' else 1.0
@@ -335,7 +336,7 @@ class DubbingPipeline:
                                 silence(remaining); break
                             dest.writeframesraw(data); remaining -= len(data) // 2
                     position = start + frames
-                    progress(i+1, len(cues), f'Completed cue {cue.index}')
+                    progress(i+1, len(cues), f'已完成 {i+1}/{len(cues)} 句')
                 silence(max(0, round(duration * rate) - position))
             temporary_output = output.with_name(output.stem + '.partial-' + work.name + output.suffix)
             try:
@@ -367,5 +368,5 @@ class DubbingPipeline:
                     raise DubbingError('Output was created by another operation; it was not overwritten') from error
             finally:
                 temporary_output.unlink(missing_ok=True)
-            progress(len(cues), len(cues), 'Dubbing complete')
+            progress(len(cues), len(cues), '配音完成')
             return str(output)

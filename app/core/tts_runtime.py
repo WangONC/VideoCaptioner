@@ -11,6 +11,7 @@ import platform
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -21,8 +22,6 @@ ROOT = Path(__file__).resolve().parents[2]
 from app.core.tts_catalog import MODELS, SOURCES, MODEL_REVISIONS
 QWEN_SOURCE_REVISION = '022e286b98fbec7e1e916cb940cdf532cd9f488e'
 SOURCE_REVISION = '4f8792ff120cd3ea470dd511e997a17c86cddd10'
-PYTHON_URL = 'https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip'
-PYTHON_SHA256 = '608619f8619075629c9c69f361352a0da6ed7e62f83a0e19c63e0ea32eb7629d'
 # Keep this separate from the GUI's Python and never install the upstream project
 # with dependency resolution: its CUDA pins would replace the AMD torch wheels.
 DEPENDENCIES = ['accelerate==1.8.1','cn2an==0.5.22','Cython==3.0.7',
@@ -40,18 +39,22 @@ class RuntimeSetupError(RuntimeError):
     pass
 
 
-def default_paths(model_id='indextts2'):
+def default_paths(model_id='indextts2', device='gpu'):
     if model_id not in MODELS:raise RuntimeSetupError('未知配音模型')
     spec=MODELS[model_id]
-    base = ROOT/'AppData'/'tts'/spec['engine']
-    return dict(python_path=str(base/'runtime'/'python.exe'),repo_path=str(base/'source'),
+    if device not in ('cpu', 'gpu'): raise RuntimeSetupError('未知运行设备')
+    base = ROOT/'AppData'/'tts'/spec['engine']/('managed-v2-cpu' if device == 'cpu' and spec['engine'] != 'edge-tts' else 'managed-v2')
+    runtime = base / 'runtime'
+    python = runtime / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+    return dict(python_path=str(python),repo_path=str(base/'source'),
                 model_dir=str(ROOT/'AppData'/'models'/spec['folder']))
 
 
 def _paths(config=None):
-    values=default_paths((config or {}).get("model_id","indextts2"))
+    values=default_paths((config or {}).get("model_id","indextts2"), (config or {}).get("device", "gpu"))
     if config: values.update({key:str(config[key]) for key in values if config.get(key)})
-    return {key:Path(value).expanduser().resolve() for key,value in values.items()}
+    # Resolving a venv's Python symlink would execute the base interpreter.
+    return {key: (Path(value).expanduser().absolute() if key == 'python_path' else Path(value).expanduser().resolve()) for key,value in values.items()}
 
 
 def _check(cancel):
@@ -92,36 +95,83 @@ def _extract(archive,directory):
         zipped.extractall(directory)
 
 
-def _command(command,cancel=None,cwd=None,timeout=1800):
+def managed_environment():
+    """Subprocess-only caches; never install into the GUI/global interpreter."""
+    cache = ROOT / 'AppData' / 'tts' / '_cache'
+    env = os.environ.copy()
+    locations = {'PIP_CACHE_DIR': 'pip', 'TEMP': 'tmp', 'TMP': 'tmp', 'TMPDIR': 'tmp',
+        'HF_HOME': 'huggingface', 'HUGGINGFACE_HUB_CACHE': 'huggingface/hub',
+        'XDG_CACHE_HOME': 'xdg', 'TORCH_HOME': 'torch', 'NUMBA_CACHE_DIR': 'numba',
+        'NLTK_DATA': 'nltk', 'UV_CACHE_DIR': 'uv', 'MODELSCOPE_CACHE': 'modelscope',
+        'HF_ASSETS_CACHE': 'huggingface/assets', 'TRITON_CACHE_DIR': 'triton',
+        'MPLCONFIGDIR': 'matplotlib', 'PYTHONUSERBASE': 'python-user'}
+    for key, relative in locations.items():
+        path = cache / relative
+        path.mkdir(parents=True, exist_ok=True)
+        env[key] = str(path)
+    env.update(PYTHONNOUSERSITE='1', PYTHONUNBUFFERED='1', PIP_DISABLE_PIP_VERSION_CHECK='1',
+               PIP_CONFIG_FILE=os.devnull, PIP_USER='0')
+    for key in ('PIP_TARGET', 'PIP_PREFIX', 'PIP_ROOT'):
+        env.pop(key, None)
+    env.pop('PYTHONPATH', None)
+    env.pop('PYTHONHOME', None)
+    return env
+
+
+def _command(command, cancel=None, cwd=None, timeout=1800, progress=None):
     _check(cancel)
-    with tempfile.TemporaryFile() as log:
-        flags=getattr(subprocess,'CREATE_NO_WINDOW',0)
-        process=subprocess.Popen([str(x) for x in command],cwd=cwd,stdin=subprocess.DEVNULL,
-            stdout=log,stderr=subprocess.STDOUT,creationflags=flags, start_new_session=os.name != 'nt')
-        deadline=time.monotonic()+timeout
-        try:
-            while process.poll() is None:
-                _check(cancel)
-                if time.monotonic()>deadline:raise RuntimeSetupError('环境准备超时，请查看网络与磁盘空间。')
-                time.sleep(.1)
-            log.seek(0,2);size=log.tell();log.seek(max(0,size-12000));text=log.read().decode('utf8','replace')
-            if process.returncode:raise RuntimeSetupError('命令未完成：\n'+text)
-            return text
-        finally:
-            if process.poll() is None:
-                if os.name == 'nt':
-                    subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-                else:
-                    try: os.killpg(process.pid, signal.SIGTERM)
-                    except ProcessLookupError: pass
-                try: process.wait(5)
-                except subprocess.TimeoutExpired:
-                    if os.name != 'nt':
-                        try: os.killpg(process.pid, signal.SIGKILL)
+    env = managed_environment()
+    # Separate read handle avoids changing the child's shared file offset.
+    with tempfile.NamedTemporaryFile(dir=env['TMPDIR'], delete=False) as output:
+        name = output.name
+    try:
+        with open(name, 'wb') as output, open(name, 'rb') as reader:
+            flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            process = subprocess.Popen([str(x) for x in command], cwd=cwd, env=env,
+                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                creationflags=flags, start_new_session=os.name != 'nt')
+            deadline = time.monotonic() + timeout
+            last_update = time.monotonic()
+            tail = b''
+            try:
+                while True:
+                    chunk = reader.read()
+                    if chunk:
+                        tail = (tail + chunk)[-12000:]
+                        if progress:
+                            for line in chunk.decode('utf8', 'replace').splitlines():
+                                if line.strip(): progress(line[-1000:])
+                        last_update = time.monotonic()
+                    if process.poll() is not None:
+                        tail = (tail + reader.read())[-12000:]
+                        break
+                    _check(cancel)
+                    if time.monotonic() > deadline:
+                        raise RuntimeSetupError('环境准备超时，请查看网络与磁盘空间。')
+                    if progress and time.monotonic() - last_update >= 5:
+                        progress('安装进程仍在运行，正在等待当前包/网络响应…')
+                        last_update = time.monotonic()
+                    time.sleep(.1)
+                text = tail.decode('utf8', 'replace')
+                if process.returncode: raise RuntimeSetupError('命令未完成：\n' + text)
+                return text
+            finally:
+                if process.poll() is None:
+                    if os.name == 'nt':
+                        subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    else:
+                        try: os.killpg(process.pid, signal.SIGTERM)
                         except ProcessLookupError: pass
-                    else: process.kill()
-                    process.wait()
+                    try: process.wait(5)
+                    except subprocess.TimeoutExpired:
+                        if os.name != 'nt':
+                            try: os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError: pass
+                        else: process.kill()
+                        process.wait()
+    finally:
+        Path(name).unlink(missing_ok=True)
 
 
 def choose_backend(adapters):
@@ -141,45 +191,46 @@ def detect_backend():
     return choose_backend([rows] if isinstance(rows,dict) else rows)
 
 
-_GPU_PROBE = '''import json,torch
-assert torch.cuda.is_available(), 'GPU unavailable; CPU fallback disabled'
-x=torch.ones(8,device='cuda'); y=(x+x).sum().item(); torch.cuda.synchronize()
-assert y==16
-print('VC_GPU:'+json.dumps(dict(device=torch.cuda.get_device_name(0),backend='rocm' if torch.version.hip else 'cuda',torch=torch.__version__)))
-'''
+_GPU_PROBE = ("import sys,json\nsys.path.insert(0," + repr(str(Path(__file__).resolve().parent)) +
+              ")\nfrom tts_gpu import select_gpu\nprint('VC_GPU:'+json.dumps(select_gpu()))\n")
 
 
 def inspect_runtime(config=None, cancel=None):
     paths = _paths(config)
     model_id = (config or {}).get('model_id', 'indextts2')
     engine = MODELS[model_id]['engine']
-    models = engine == 'edge-tts' or verify_models(paths['model_dir'], model_id, cancel, repo_path=paths['repo_path'])
+    models = engine == 'edge-tts' or verify_models(paths['model_dir'], model_id, cancel, full=False, repo_path=paths['repo_path'])
     result = dict(ready=False, models_ready=models, device=None, message='尚未准备运行环境')
     marker = SOURCES[engine][2]
     if not paths['python_path'].is_file() or (marker and not (paths['repo_path'] / marker).is_file()):
         return result
     try:
-        probe = _runtime_probe(engine, paths['repo_path'])
+        probe = _runtime_probe(engine, paths['repo_path'], (config or {}).get('device', 'gpu'))
         text = _command([paths['python_path'], '-c', probe], cancel=cancel, cwd=paths['repo_path'] if marker else None, timeout=90)
         info = json.loads(next(line[7:] for line in text.splitlines() if line.startswith('VC_GPU:')))
-        return result | info | dict(ready=True, message='在线语音环境可用' if engine == 'edge-tts' else 'GPU 与基础依赖检查通过，模型推理待实测' if engine == 'gpt-sovits' else 'GPU 与引擎导入检查通过')
+        return result | info | dict(ready=True, message='在线语音环境可用' if engine == 'edge-tts' else ('CPU' if (config or {}).get('device') == 'cpu' else 'GPU') + ' 与引擎依赖检查通过，模型推理待实测')
     except Exception as error:
         _check(cancel)
         return result | dict(message=str(error))
 
 
-def _runtime_probe(engine, source):
+def _runtime_probe(engine, source, device='gpu'):
     # Import the actual adapter dependency, not just torch. No weights are loaded.
     import_paths = [str(source), str(source / 'src'), str(source / 'GPT_SoVITS'), str(source / 'third_party' / 'Matcha-TTS')]
     setup = 'import sys,os;sys.path[:0]=' + repr(import_paths) + ';os.environ[\"NLTK_DATA\"]=' + repr(str(source / '.nltk_data')) + '\n'
+    setup += "os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_DATASETS_OFFLINE='1')\n"
     if engine == 'edge-tts':
         return setup + SOURCES[engine][3] + "\nprint('VC_GPU:' + __import__('json').dumps(dict(backend='online', device='Edge TTS')))"
+    probe = _GPU_PROBE if device == 'gpu' else '''import torch,json
+x=torch.ones(8,device='cpu');assert (x+x).sum().item()==16
+print('VC_GPU:'+json.dumps(dict(device='cpu',backend='cpu',torch=torch.__version__)))
+'''
     if engine == 'gpt-sovits':
         # The text front-end may initialize assets during import; preparation
         # checks dependencies without triggering model downloads or loading weights.
         imports = 'import transformers, librosa, soundfile, onnxruntime, peft, nltk, pyopenjtalk, jieba'
-        return setup + _GPU_PROBE + '\n' + imports
-    return setup + _GPU_PROBE + '\n' + SOURCES[engine][3]
+        return setup + probe + '\n' + imports
+    return setup + probe + '\n' + SOURCES[engine][3]
 
 
 def _patch(path,old,new):
@@ -223,21 +274,51 @@ def _gpt_windows_compat(source):
     _patch(source / 'GPT_SoVITS/text/tone_sandhi.py', 'import jieba_fast as jieba', 'import jieba  # VideoCaptioner: pure Python Windows frontend')
 
 
-def _download_source(project, revision, stage, destination, cancel):
-    archive = stage / (destination.name + '.zip')
-    digest = _fetch('https://codeload.github.com/' + project + '/zip/' + revision, archive, cancel)
-    unpacked = stage / (destination.name + '-unpacked')
-    _extract(archive, unpacked)
-    children = list(unpacked.iterdir())
-    if len(children) != 1 or not children[0].is_dir():
-        raise RuntimeSetupError('引擎安装包目录异常')
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        # GitHub archives contain an empty directory for gitlinks.
-        if any(destination.iterdir()):
-            raise RuntimeSetupError('子模块目标不为空，未覆盖')
-        destination.rmdir()
-    shutil.move(str(children[0]), destination)
+def _download_source(project, revision, stage, destination, cancel, progress=None):
+    stage = Path(stage); destination = Path(destination)
+    archive = stage / (destination.name + '-' + revision + '.zip')
+    receipt = archive.with_suffix('.sha256')
+    digest = None
+    if archive.is_file() and receipt.is_file():
+        digest = _sha256(archive, cancel)
+        if digest != receipt.read_text('ascii').strip(): digest = None
+    if not digest:
+        digest = _fetch('https://codeload.github.com/' + project + '/zip/' + revision, archive, cancel, progress=progress)
+        receipt.write_text(digest, 'ascii')
+    # A source receipt closes the interruption window after source publication.
+    source_receipt = destination / '.videocaptioner-download.json'
+    if source_receipt.is_file():
+        recorded = json.loads(source_receipt.read_text('utf8'))
+        if recorded == dict(revision=revision, archive_sha256=digest): return digest
+        raise RuntimeSetupError('已有源码身份不同，未覆盖')
+    with tempfile.TemporaryDirectory(prefix='unpack-', dir=stage) as folder:
+        unpacked = Path(folder)
+        _extract(archive, unpacked)
+        children = list(unpacked.iterdir())
+        if len(children) != 1 or not children[0].is_dir():
+            raise RuntimeSetupError('引擎安装包目录异常')
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        tree = children[0]
+        if not destination.exists():
+            shutil.move(str(tree), destination)
+        else:
+            # Model-only GPT assets can precede source installation. Merge only
+            # absent or byte-identical files, never replace user/model contents.
+            for item in tree.rglob('*'):
+                target = destination / item.relative_to(tree)
+                if target.is_symlink() or not target.resolve().is_relative_to(destination.resolve()):
+                    raise RuntimeSetupError('源码目标包含不安全路径，未覆盖')
+                if target.exists() and (item.is_dir() != target.is_dir() or
+                        (item.is_file() and _sha256(item, cancel) != _sha256(target, cancel))):
+                    raise RuntimeSetupError('源码目标有冲突文件，未覆盖：' + str(target))
+            for item in tree.rglob('*'):
+                _check(cancel)
+                target = destination / item.relative_to(tree)
+                if item.is_dir(): target.mkdir(parents=True, exist_ok=True)
+                elif not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, target)
+        source_receipt.write_text(json.dumps(dict(revision=revision, archive_sha256=digest)), 'utf8')
     return digest
 
 
@@ -278,109 +359,134 @@ def _engine_dependencies(engine):
     raise RuntimeSetupError('未知配音引擎')
 
 
+def runtime_installed(config=None):
+    """Fast read-only UI state; directories alone are not successful setup."""
+    paths = _paths(config)
+    receipt = paths['repo_path'].parent / '.videocaptioner-setup.json'
+    try:
+        state = json.loads(receipt.read_text('utf8'))
+        return bool(state.get('complete') and state.get('engine') == MODELS[(config or {}).get('model_id', 'indextts2')]['engine'] and paths['python_path'].is_file())
+    except (OSError, ValueError):
+        # Existing external/legacy environments remain checkable, not overwritten.
+        return paths['python_path'].is_file() and not (paths['python_path'].parent.parent / 'pyvenv.cfg').exists()
+
+
 def prepare_runtime(progress, cancel, config=None):
     model_id = (config or {}).get('model_id', 'indextts2')
     engine = MODELS[model_id]['engine']
     paths = _paths(config)
-    managed = _paths(dict(model_id=model_id))
+    device = (config or {}).get('device', 'gpu')
+    managed = _paths(dict(model_id=model_id, device=device))
     if paths != managed:
         state = inspect_runtime(config, cancel)
-        if not state['ready']:
-            raise RuntimeSetupError(state['message'])
+        if not state['ready']: raise RuntimeSetupError(state['message'])
         progress(100, state['message'])
         return
-    if platform.system() != 'Windows':
-        raise RuntimeSetupError('自动安装目前面向 Windows；其他系统请使用已配置的独立环境。')
-    backend = 'online' if engine == 'edge-tts' else detect_backend()
+    backend = 'online' if engine == 'edge-tts' else 'cpu' if device == 'cpu' else detect_backend()
     _check(cancel)
-    if paths['python_path'].exists():
-        state = inspect_runtime(config, cancel)
-        if state['ready']:
-            progress(100, state['message'])
-            return
-        raise RuntimeSetupError('已有环境未通过检查，已保留原环境，不会覆盖：\n' + state['message'])
+    required = (3, 12) if backend.startswith('rocm') else None
+    version = tuple(sys.version_info[:2])
+    if getattr(sys, 'frozen', False) or (required and version != required) or not ((3, 10) <= version <= (3, 12)):
+        raise RuntimeSetupError('当前 Python %s.%s 不兼容此安装方案；请使用 Python %s 启动项目后重试。不会自动下载另一份 Python。' % (*version, '3.12（AMD ROCm 7.2.1）' if required else '3.10–3.12'))
     root = paths['repo_path'].parent
+    runtime, source = root / 'runtime', paths['repo_path']
+    receipt = root / '.videocaptioner-setup.json'
+    project, revision, marker, _ = SOURCES[engine]
+    identity = dict(engine=engine, revision=revision, backend=backend, python=list(version), recipe=2)
+    if receipt.exists():
+        state = json.loads(receipt.read_text('utf8'))
+        if any(state.get(k) != v for k, v in identity.items()):
+            raise RuntimeSetupError('已有环境的 Python/安装方案不同，已保留；请使用原解释器或配置独立环境。')
+        if state.get('complete'):
+            checked = inspect_runtime(config, cancel)
+            if checked['ready']:
+                progress(100, checked['message']); return
+            state['complete'] = False
+    else:
+        if runtime.exists() or (source.exists() and engine != 'gpt-sovits'):
+            checked = inspect_runtime(config, cancel)
+            if checked['ready']:
+                progress(100, checked['message']); return
+            raise RuntimeSetupError('已有目录不属于本次安装，未覆盖：' + checked['message'])
+        state = dict(identity, complete=False)
     root.mkdir(parents=True, exist_ok=True)
-    needed = (1 if engine == 'edge-tts' else 15) * 1024**3
-    if shutil.disk_usage(root).free < needed:
-        raise RuntimeSetupError('运行环境准备空间不足。')
-    if paths['repo_path'].exists():
-        raise RuntimeSetupError('目标源码目录已存在，未覆盖。')
-    project, revision, _, _ = SOURCES[engine]
-    with tempfile.TemporaryDirectory(prefix='.setup-', dir=root) as folder:
-        stage = Path(folder)
-        runtime, source = stage / 'runtime', stage / 'source'
-        progress(2, '正在下载独立 Python')
-        _fetch(PYTHON_URL, stage / 'python.zip', cancel, PYTHON_SHA256)
-        _extract(stage / 'python.zip', runtime)
-        (runtime / 'Lib' / 'site-packages').mkdir(parents=True, exist_ok=True)
-        (runtime / 'python310._pth').write_text('python310.zip\n.\nLib\\site-packages\nimport site\n', 'ascii')
-        python = runtime / 'python.exe'
-        metadata = _json_url('https://pypi.org/pypi/pip/25.0.1/json')
-        wheel = next(row for row in metadata['urls'] if row['filename'].endswith('py3-none-any.whl'))
-        _fetch(wheel['url'], stage / 'pip.whl', cancel, wheel['digests']['sha256'])
-        _extract(stage / 'pip.whl', runtime / 'Lib' / 'site-packages')
-        progress(10, '正在下载配音引擎')
-        archive_hash = None
-        if project:
-            archive_hash = _download_source(project, revision, stage, source, cancel)
-        else:
-            source.mkdir()
-        if engine == 'cosyvoice3':
-            _download_source('shivammehta25/Matcha-TTS', 'dd9105b34bf2be2230f4aa1e4769fb586a3c824e', stage,
-                             source / 'third_party' / 'Matcha-TTS', cancel)
-        pip = [python, '-m', 'pip', 'install', '--disable-pip-version-check']
-        # Build dependencies are explicit; some upstream packages may need a local
-        # compiler. Fail with pip's diagnostic rather than silently skipping them.
-        _command(pip + ['setuptools==75.8.0', 'wheel==0.45.1'], cancel)
-        constraints = stage / 'constraints.txt'
-        torch = []
-        if backend != 'online':
-            if backend == 'cuda':
-                torch = ['torch==2.8.0', 'torchaudio==2.8.0']
-                index = 'https://download.pytorch.org/whl/cu128'
-            else:
-                # Official gfx120X index includes cp310 win_amd64 wheels. A tensor
-                # probe is still required; this recipe is not hardware certification.
-                torch = ['torch==2.11.0+rocm7.13.0', 'torchaudio==2.11.0+rocm7.13.0', 'torchvision==0.26.0+rocm7.13.0']
-                index = 'https://repo.amd.com/rocm/whl/gfx120X-all'
-            progress(20, '正在安装 GPU 运行时')
-            _command(pip + ['--index-url', index, '--extra-index-url', 'https://pypi.org/simple'] + torch, cancel)
-        constraints.write_text('\n'.join(torch) + '\n', 'utf8')
-        progress(55, '正在安装配音依赖')
-        _command(pip + ['-c', constraints] + _engine_dependencies(engine), cancel)
-        if engine in ('indextts2', 'cosyvoice3'):
-            _command(pip + ['-c', constraints, '--no-deps', 'openai-whisper==20250625'], cancel)
-        if engine in ('indextts2', 'gpt-sovits'):
-            _prepare_nltk(source, cancel)
-        if engine == 'indextts2' and backend != 'cuda':
-            _amd_compat(runtime, source)
-        if engine == 'dots':
-            _dots_windows_compat(source)
-        if engine == 'gpt-sovits':
-            _gpt_windows_compat(source)
-        progress(90, '正在检查运行时和引擎导入')
-        text = _command([python, '-c', _runtime_probe(engine, source)], cancel, cwd=source, timeout=90)
-        info = json.loads(next(line[7:] for line in text.splitlines() if line.startswith('VC_GPU:')))
-        if backend != 'online' and ((backend == 'cuda') != (info['backend'] == 'cuda')):
-            raise RuntimeSetupError('实际 GPU 后端与安装方案不一致。')
+    def save():
+        temporary = receipt.with_suffix('.tmp')
+        temporary.write_text(json.dumps(state, ensure_ascii=False), 'utf8')
+        temporary.replace(receipt)
+    save()
+    stage = root / '.setup-cache'
+    stage.mkdir(exist_ok=True)
+    python = paths['python_path']
+    def command(args, percent, **kwargs):
+        return _command(args, cancel, progress=lambda line: progress(percent, line), **kwargs)
+    def install_urls(packages, percent):
+        # Direct URLs otherwise download again even when an identical wheel is
+        # installed. Check installed metadata first; imports are checked below.
+        code = "import json,importlib.metadata as m;print(json.dumps({d.metadata['Name'].lower().replace('_','-'):d.version for d in m.distributions()}))"
+        installed = json.loads(command([python, '-c', code], percent).splitlines()[-1])
+        missing = [url for name, version, url in packages if installed.get(name.replace('_', '-')) != version]
+        if missing: command(pip + missing, percent)
+        else: progress(percent, '复用已安装并核对版本的 GPU 依赖')
+    progress(2, '复用当前 Python，在项目内准备隔离依赖（不下载解释器）')
+    if not python.is_file():
+        command([sys.executable, '-m', 'venv', str(runtime)], 2)
+    # Verify venv isolation before any pip command (never target a global interpreter).
+    command([python, '-c', 'import sys; assert sys.prefix != sys.base_prefix, "not an isolated venv"'], 3)
+    try:
+        command([python, '-m', 'pip', '--version'], 4)
+    except RuntimeSetupError:
         _check(cancel)
-        installed = _command([python, '-m', 'pip', 'freeze'], cancel, timeout=30)
-        (source / '.videocaptioner-source.json').write_text(json.dumps(dict(
-            revision=revision, archive_sha256=archive_hash, backend=backend, engine=engine,
-            patches=(['lazy-optional-wfst-v1'] if engine == 'dots' else ['jieba-python-v1', 'pyopenjtalk-plus-v1'] if engine == 'gpt-sovits' else ['amd-compat-v1'] if engine == 'indextts2' and backend != 'cuda' else []),
-            packages=installed.splitlines()), ensure_ascii=False), 'utf8')
-        # Publish both directories only after all checks. If publication fails,
-        # the installed directory remains visibly incomplete, never reported ready.
-        shutil.move(str(source), paths['repo_path'])
-        try:
-            shutil.move(str(runtime), paths['python_path'].parent)
-        except Exception as error:
-            # This is only the just-created source; restore it into staging so a
-            # retry is possible and no unrelated existing environment is removed.
-            shutil.move(str(paths['repo_path']), source)
-            raise RuntimeSetupError('运行环境发布失败，尚未安装；可重试。') from error
-    progress(100, '在线语音环境已准备' if engine == 'edge-tts' else 'GPU 环境已准备；请继续下载模型')
+        command([python, '-m', 'ensurepip', '--upgrade'], 4)
+    progress(10, '准备配音引擎源码')
+    if project and not state.get('source_ready'):
+        state['archive_sha256'] = _download_source(project, revision, stage, source, cancel,
+            progress=lambda done, total: progress(10, '下载引擎 %.1f / %s MB' % (done / 1e6, '%.1f' % (total / 1e6) if total else '?')))
+        state['source_ready'] = True; save()
+    elif not project:
+        source.mkdir(exist_ok=True)
+    if marker and not (source / marker).is_file():
+        raise RuntimeSetupError('已下载源码缺少必要文件，已保留现场，请检查环境目录。')
+    if engine == 'cosyvoice3' and not state.get('matcha_ready'):
+        _download_source('shivammehta25/Matcha-TTS', 'dd9105b34bf2be2230f4aa1e4769fb586a3c824e', stage, source / 'third_party' / 'Matcha-TTS', cancel)
+        state['matcha_ready'] = True; save()
+    pip = [python, '-m', 'pip', 'install', '--disable-pip-version-check', '--progress-bar', 'off']
+    # Re-running pip validates installed versions and reuses the project wheel cache;
+    # a phase flag alone is never evidence that installed packages are intact.
+    command(pip + ['setuptools==75.8.0', 'wheel==0.45.1'], 15)
+    torch = []
+    if backend == 'cpu':
+        torch = ['torch==2.8.0+cpu', 'torchaudio==2.8.0+cpu']
+        command(pip + ['--index-url', 'https://download.pytorch.org/whl/cpu'] + torch, 20)
+    elif backend == 'cuda':
+        torch = ['torch==2.8.0', 'torchaudio==2.8.0']
+        command(pip + ['--index-url', 'https://download.pytorch.org/whl/cu128', '--extra-index-url', 'https://pypi.org/simple'] + torch, 20)
+    elif backend.startswith('rocm'):
+        progress(20, 'AMD 官方 Windows ROCm 7.2.1 / Python 3.12；需驱动 26.2.2，安装不会修改驱动')
+        base = 'https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/'
+        install_urls([(name, '7.2.1', base + name + '-7.2.1-py3-none-win_amd64.whl') for name in ('rocm_sdk_core', 'rocm_sdk_devel', 'rocm_sdk_libraries_custom')] + [('rocm', '7.2.1', base + 'rocm-7.2.1.tar.gz')], 20)
+        versions = [('torch', '2.9.1'), ('torchaudio', '2.9.1'), ('torchvision', '0.24.1')]
+        torch = [name + '==' + version + '+rocm7.2.1' for name, version in versions]
+        install_urls([(name, version + '+rocm7.2.1', base + name + '-' + version + '%2Brocm7.2.1-cp312-cp312-win_amd64.whl') for name, version in versions], 30)
+    constraints = stage / 'constraints.txt'
+    constraints.write_text('\n'.join(torch) + '\n', 'utf8')
+    command(pip + ['-c', constraints] + _engine_dependencies(engine), 55)
+    if engine in ('indextts2', 'cosyvoice3'):
+        command(pip + ['-c', constraints, '--no-deps', 'openai-whisper==20250625'], 70)
+    if engine in ('indextts2', 'gpt-sovits'): _prepare_nltk(source, cancel)
+    if engine == 'indextts2' and backend.startswith('rocm'): _amd_compat(runtime, source)
+    if engine == 'dots': _dots_windows_compat(source)
+    if engine == 'gpt-sovits': _gpt_windows_compat(source)
+    progress(90, '检查运行时和引擎导入（不下载模型）')
+    text = command([python, '-c', _runtime_probe(engine, source, device)], 90, cwd=source, timeout=90)
+    info = json.loads(next(line[7:] for line in text.splitlines() if line.startswith('VC_GPU:')))
+    if backend != 'online' and info['backend'] != ('rocm' if backend.startswith('rocm') else backend):
+        raise RuntimeSetupError('实际 GPU 后端与安装方案不一致。')
+    installed = command([python, '-m', 'pip', 'freeze'], 95, timeout=30)
+    _check(cancel)
+    (source / '.videocaptioner-source.json').write_text(json.dumps(dict(identity, archive_sha256=state.get('archive_sha256'), packages=installed.splitlines()), ensure_ascii=False), 'utf8')
+    state['complete'] = True; save()
+    progress(100, '在线语音环境已准备' if engine == 'edge-tts' else ('CPU' if backend == 'cpu' else 'GPU') + ' 环境检查通过；模型推理需在本机实测')
 
 
 # The upstream infer_v2 accepts these flat auxiliary locations. No network is
@@ -530,7 +636,7 @@ def download_models(progress, cancel, config=None):
         progress(int(95 * done_bytes / max(total, 1)), '下载 ' + row['name'])
         url = 'https://huggingface.co/' + row['repo'] + '/resolve/' + row['revision'] + '/' + urllib.parse.quote(row['name'], safe='/')
         def update(done, size):
-            progress(min(95, int(95 * (done_bytes + done) / max(total, 1))), '下载 ' + row['name'])
+            progress(min(95, int(95 * (done_bytes + done) / max(total, 1))), '下载 %s · %.1f / %.1f MB' % (row['name'], done / 1e6, row['size'] / 1e6))
         # _fetch stages each file atomically; the inventory marker is published only
         # after EVERY file is verified. Retry reuses verified complete files.
         _fetch(url, path, cancel, row['sha256'], update)

@@ -63,7 +63,8 @@ class SettingsTests(unittest.TestCase):
         page.task_type_combo.setCurrentText(str(BatchTaskType.DUBBING))
         page.add_task_to_table('/tmp/course.mp4')
         self.assertTrue(page.start_all_btn.isEnabled())
-        self.assertIn('未选择字幕', page.task_table.item(0,0).text())
+        self.assertEqual(page.task_table.item(0,0).text(), 'course.mp4')
+        self.assertEqual(page.task_table.horizontalHeaderItem(0).text(), '文件名')
         with patch.object(page.batch_thread, 'add_task') as add:
             page.start_all_tasks(); page.start_task('/tmp/course.mp4'); add.assert_not_called()
         page.task_type_combo.setCurrentText(str(BatchTaskType.DUBBING_SYNTHESIS))

@@ -31,30 +31,44 @@ def write_audio(path, audio, sample_rate):
 
 
 class StandardAdapter:
-    def __init__(self, engine, models, repo):
+    def __init__(self, engine, models, repo, device='cuda'):
         self.engine = engine
         self.models = Path(models)
         self.repo = Path(repo)
         self.prompt_cache = {}
         if engine == 'edge-tts':
             import edge_tts
+            # edge-tts 7.3.1 pins certifi-only contexts. Also honor the OS /
+            # explicit SSL_CERT_FILE trust store (e.g. an installed enterprise
+            # proxy CA), while keeping hostname and certificate verification.
+            import ssl
+            for name in ('voices', 'communicate'):
+                context = getattr(getattr(edge_tts, name, None), '_SSL_CTX', None)
+                if context is not None:
+                    context.load_default_certs()
+                    if not context.check_hostname or context.verify_mode != ssl.CERT_REQUIRED:
+                        raise RuntimeError('Edge TTS TLS 证书校验未启用')
             self.edge_tts = edge_tts
             self.voices = None
             return
         import torch
         self.torch = torch
+        self.device = device
+        if device != 'cpu':
+            torch.cuda.set_device(torch.device(device))
         if engine.startswith('qwen3'):
             from qwen_tts import Qwen3TTSModel
             self.qwen_class = Qwen3TTSModel
             self.model = None if engine == 'qwen3-design' else self._load_qwen(self.models)
         elif engine == 'dots':
             from dots_tts.runtime import DotsTtsRuntime
-            self.model = DotsTtsRuntime.from_pretrained(str(self.models), precision='float16', optimize=False)
+            self.model = DotsTtsRuntime.from_pretrained(str(self.models), precision='float32' if self.device == 'cpu' else 'float16', optimize=False)
+            self.model.device = torch.device(self.device)
         elif engine == 'indextts2':
             from indextts.infer_v2 import IndexTTS2
             auxiliary = self.models / 'hf_cache'
             self.model = IndexTTS2(cfg_path=str(self.models / 'config.yaml'), model_dir=str(self.models),
-                use_fp16=True, device='cuda', use_cuda_kernel=False, use_deepspeed=False, use_qwen_emo=False,
+                use_fp16=self.device != 'cpu', device=self.device, use_cuda_kernel=False, use_deepspeed=False, use_qwen_emo=False,
                 aux_paths=dict(w2v_bert=str(auxiliary/'w2v-bert-2.0'),
                     semantic_codec=str(auxiliary/'semantic_codec_model.safetensors'),
                     campplus=str(auxiliary/'campplus_cn_common.bin'), bigvgan=str(auxiliary/'bigvgan')))
@@ -126,8 +140,8 @@ class StandardAdapter:
             write_audio(output, result['audio'], result['sample_rate'])
 
     def _load_qwen(self, path):
-        return self.qwen_class.from_pretrained(str(path), device_map='cuda:0',
-            dtype=self.torch.float16, attn_implementation='sdpa', local_files_only=True)
+        return self.qwen_class.from_pretrained(str(path), device_map=self.device,
+            dtype=self.torch.float32 if self.device == 'cpu' else self.torch.float16, attn_implementation='sdpa', local_files_only=True)
 
     def _design_clone(self, request, language):
         description = request.get('description', '').strip()

@@ -59,7 +59,7 @@ def _write_audio(output, chunks, sample_rate):
 
 
 class CosyVoice3Adapter:
-    def __init__(self, models, repo):
+    def __init__(self, models, repo, device='cuda'):
         root = Path(models).resolve()
         for name in ('cosyvoice3.yaml', 'llm.pt', 'flow.pt', 'hift.pt',
                      'campplus.onnx', 'speech_tokenizer_v3.onnx'):
@@ -67,8 +67,19 @@ class CosyVoice3Adapter:
         _require(root / 'CosyVoice-BlankEN', directory=True)
         matcha = _require(Path(repo) / 'third_party' / 'Matcha-TTS', directory=True)
         sys.path.insert(0, str(matcha))
+        import torch
+        if device != 'cpu':
+            torch.cuda.set_device(torch.device(device))
         from cosyvoice.cli.cosyvoice import AutoModel
         self.model = AutoModel(model_dir=str(root), load_trt=False, load_vllm=False, fp16=False)
+        # CosyVoice starts worker threads: bind their tensor allocations explicitly
+        # rather than relying on the main thread's current CUDA device.
+        self.model.model.device = torch.device(device)
+        self.model.frontend.device = torch.device(device)
+        session = self.model.frontend.speech_tokenizer_session
+        if device != 'cpu' and 'CUDAExecutionProvider' in session.get_providers():
+            session.set_providers([('CUDAExecutionProvider', {
+                'device_id': torch.device(device).index or 0}), 'CPUExecutionProvider'])
 
     def synthesize(self, request):
         reference = _reference(request)
@@ -91,16 +102,19 @@ class CosyVoice3Adapter:
 
 
 class GPTSoVITSAdapter:
-    def __init__(self, models, repo):
+    def __init__(self, models, repo, device='cuda'):
         root = Path(models).resolve()
         values = {key: str(_require(root / relative, directory=key.endswith('base_path')))
                   for key, relative in GPT_FILES.items()}
         # Chinese G2PW reads this environment key at module import time.
         os.environ['bert_path'] = values['bert_base_path']
         sys.path.insert(0, str(Path(repo).resolve() / 'GPT_SoVITS'))
+        import torch
+        if device != 'cpu':
+            torch.cuda.set_device(torch.device(device))
         from TTS_infer_pack.TTS import TTS, TTS_Config
-        config = TTS_Config({'custom': dict(values, device='cuda', is_half=True, version='v2')})
-        if str(config.device) == 'cpu':
+        config = TTS_Config({'custom': dict(values, device=device, is_half=device != 'cpu', version='v2')})
+        if str(config.device) == 'cpu' and device != 'cpu':
             raise RuntimeError('GPT-SoVITS 未启用 GPU；不会自动回退 CPU')
         # Upstream saves its configuration on weight load. Keep those writes in a
         # worker-owned temporary directory, never rewrite the engine/user config.
@@ -138,9 +152,9 @@ class GPTSoVITSAdapter:
         _write_audio(request['output_path'], chunks, rate or 0)
 
 
-def create_adapter(engine, models, repo):
+def create_adapter(engine, models, repo, device='cuda'):
     if engine == 'cosyvoice3':
-        return CosyVoice3Adapter(models, repo)
+        return CosyVoice3Adapter(models, repo, device=device)
     if engine in ('gpt-sovits', 'gpt_sovits'):
-        return GPTSoVITSAdapter(models, repo)
+        return GPTSoVITSAdapter(models, repo, device=device)
     raise ValueError('未知本地配音引擎：' + str(engine))

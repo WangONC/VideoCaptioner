@@ -6,7 +6,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt5.QtGui import QDesktopServices, QPixmap, QFont
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QDialog, QFormLayout, QTableWidgetItem, QHeaderView
 from qfluentwidgets import (BodyLabel, CaptionLabel, SubtitleLabel, CardWidget, LineEdit,
-    ComboBox, PrimaryPushButton, PushButton, ProgressBar, CheckBox, TextEdit, InfoBar)
+    ComboBox, PrimaryPushButton, PushButton, ProgressBar, ProgressRing, CheckBox, TextEdit, InfoBar)
 from app.core.tts_catalog import MODELS
 from app.config import APPDATA_PATH, MODEL_PATH, CACHE_PATH, RESOURCE_PATH
 from qfluentwidgets import SingleDirectionScrollArea, CommandBar, Action, FluentIcon, TransparentDropDownPushButton, RoundMenu, HyperlinkCard, MessageBoxBase, TableWidget, HyperlinkButton
@@ -31,7 +31,7 @@ class DubbingJob(QThread):
 
     def run_setup(self):
         try:
-            if self.operation not in ('check_runtime', 'prepare', 'runtime', 'models'):
+            if self.operation not in ('check_runtime', 'check_models', 'runtime', 'models'):
                 raise ValueError('未知环境操作')
             if self.config.get('backend') == 'audio.cpp':
                 from app.core import audio_cpp_runtime as tts_runtime
@@ -43,11 +43,16 @@ class DubbingJob(QThread):
                     raise RuntimeError(state['message'])
                 self.runtime_ready = True
                 result = state['message']
-            elif self.operation == 'prepare':
-                tts_runtime.prepare_runtime(lambda v,m:self.progress.emit(v//2,m), self.cancel_event, config=self.config)
-                self.runtime_ready = True
-                tts_runtime.download_models(lambda v,m:self.progress.emit(50+v//2,m), self.cancel_event, config=self.config)
-                result = '环境与模型已准备'
+            elif self.operation == 'check_models':
+                self.progress.emit(0, '正在校验本地模型文件…')
+                if self.config.get('backend') == 'audio.cpp':
+                    ready = tts_runtime.models_ready(self.config, cancel=self.cancel_event, verify_hash=True)
+                else:
+                    ready = tts_runtime.verify_models(self.config['model_dir'], self.config['model_id'],
+                        cancel=self.cancel_event, full=True, repo_path=self.config['repo_path'])
+                if not ready:
+                    raise RuntimeError('模型文件缺失或校验失败；请重新下载模型，检查不会自动下载或安装环境')
+                result = '模型文件校验通过'
             else:
                 function = tts_runtime.prepare_runtime if self.operation == 'runtime' else tts_runtime.download_models
                 function(self.progress.emit, self.cancel_event, config=self.config)
@@ -69,8 +74,9 @@ class DubbingInterface(QWidget):
         self.last_output = None
         self.environment_checks = {}
         self.model_id = "indextts2"
-        from app.core.dubbing.execution import backend_choices
+        from app.core.dubbing.execution import backend_choices, device_choices
         self.backend_choices = backend_choices
+        self.device_choices = device_choices
         self.runtime_config = self.paths_for_model(self.model_id)
         from app.core.dubbing.settings import shared_settings
         self.dubbing_settings = shared_settings.value()
@@ -141,7 +147,16 @@ class DubbingInterface(QWidget):
         self.video_title.setFont(QFont('Microsoft YaHei',14,QFont.Bold))
         self.video_detail = BodyLabel('', media)
         info.addWidget(self.video_title)
-        info.addWidget(self.video_detail)
+        details_row = QHBoxLayout()
+        details_row.setSpacing(15)
+        details_row.addWidget(self.video_detail)
+        self.progress_bar = ProgressRing(media)
+        self.progress_bar.setFixedSize(20, 20)
+        self.progress_bar.setStrokeWidth(4)
+        self.progress_bar.hide()
+        details_row.addWidget(self.progress_bar)
+        details_row.addStretch()
+        info.addLayout(details_row)
         row.addLayout(info, 1)
         buttons = QVBoxLayout()
         self.open_button = PushButton('打开文件夹', media)
@@ -182,11 +197,7 @@ class DubbingInterface(QWidget):
         self.runtime_status.hide()
         self.status_label=BodyLabel('',self)
         self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
-        self.progress_bar=ProgressBar(self)
-        self.progress_bar.setValue(0)
-        self.progress_bar.hide()
-        layout.addWidget(self.progress_bar)
+        self.status_label.hide()
         self.details=TextEdit(self)
         self.details.setReadOnly(True)
         self.details.setMaximumHeight(95)
@@ -266,6 +277,8 @@ class DubbingInterface(QWidget):
             self.output_input.setText(str(target.with_suffix('.wav' if value['output'] == '配音音频' else '.mp4')))
         self.model_id = value['model_id']
         self.model_button.setText(MODEL_OPTIONS[self.model_id]['name'])
+        self.model_button.setFixedWidth(max(180, self.model_button.fontMetrics().horizontalAdvance(self.model_button.text()) + 80))
+        self.command_bar.updateGeometry()
         if self.model_id in MODELS:
             self.runtime_config = self.paths_for_model(self.model_id)
         if self.settings_widget.value() != value:
@@ -276,6 +289,17 @@ class DubbingInterface(QWidget):
 
     def backend_for_model(self, model_id):
         return self.backend_choices.get(model_id, 'pytorch')
+
+    def device_for_model(self, model_id):
+        return self.device_choices.get(model_id, 'gpu')
+
+    def set_device(self, model_id, device):
+        if self.job is not None or device not in ('gpu', 'cpu'):
+            return
+        self.device_choices[model_id] = device
+        if model_id == self.model_id:
+            self.runtime_config = self.paths_for_model(model_id)
+        self.setup_finished.emit()
 
     def set_backend(self, model_id, backend):
         if self.job is not None or backend not in ('pytorch', 'audio.cpp'):
@@ -292,7 +316,7 @@ class DubbingInterface(QWidget):
     def environment_key(self, model_id):
         paths = self.paths_for_model(model_id)
         if self.backend_for_model(model_id) == 'audio.cpp':
-            return ('audio.cpp', paths['python_path'])
+            return ('audio.cpp', paths['python_path'], self.device_for_model(model_id))
         return ('pytorch', MODELS[model_id]['engine'], paths['python_path'], paths['repo_path'])
 
     def environment_state(self, model_id):
@@ -301,7 +325,8 @@ class DubbingInterface(QWidget):
         if backend == 'audio.cpp':
             installed = Path(paths['python_path']).is_file()
         else:
-            installed = Path(paths['python_path']).is_file() or Path(paths['repo_path']).exists()
+            from app.core.tts_runtime import runtime_installed
+            installed = runtime_installed(dict(paths, model_id=model_id, device=self.device_for_model(model_id)))
         check = self.environment_checks.get(self.environment_key(model_id))
         if check:
             ready, message = check
@@ -324,7 +349,16 @@ class DubbingInterface(QWidget):
             from app.core.audio_cpp_runtime import required_models
             total = sum(spec['size'] for spec in required_models(model_id))
             return f'{total / 1e9:.2f} GB'
-        return MODELS[model_id].get('download_size', '待获取')
+        if model_id == 'edge-tts':
+            return '无需模型'
+        try:
+            manifest = json.loads((Path(self.paths_for_model(model_id)['model_dir']) / 'videocaptioner-models.json').read_text('utf8'))
+            if manifest.get('model_id') == model_id and manifest.get('files'):
+                total = sum(int(row['size']) for row in manifest['files'])
+                return f'{total / 1e9:.2f} GB'
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return '未知'
 
     def edit_runtime(self):
         if self.model_id not in MODELS:
@@ -355,7 +389,7 @@ class DubbingInterface(QWidget):
         if target not in MODELS:
             self.status_label.setText("暂不可用")
             return
-        if self.job is None: self.launch_job(operation, dict(self.paths_for_model(target),model_id=target,backend=self.backend_for_model(target)))
+        if self.job is None: self.launch_job(operation, dict(self.paths_for_model(target),model_id=target,backend=self.backend_for_model(target),device=self.device_for_model(target)))
 
     def start_dubbing(self):
         if self.job is not None: return
@@ -368,7 +402,9 @@ class DubbingInterface(QWidget):
             self.on_failure(str(error))
 
     def launch_job(self, operation, config):
-        self.details.clear();self.details.hide();self.progress_bar.setValue(0);self.progress_bar.show()
+        self.details.clear();self.details.hide();self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(operation == 'dub')
+        self._completion_text = None
         if operation == 'dub':
             from app.thread.dubbing_thread import DubbingThread
             self.job = DubbingThread(config, self)
@@ -385,31 +421,51 @@ class DubbingInterface(QWidget):
         for field in (self.video_input,self.subtitle_input,self.output_input):field.setEnabled(False)
         self.cancel_button.show();self.cancel_button.setEnabled(True)
         self.status_label.setText('正在检查并准备任务…')
-        self.update_ready();self.job.start()
+        self.update_ready()
+        if operation == 'dub': self.start_button.setText('正在配音')
+        self.job.start()
 
     def on_progress(self, value, message):
         self.progress_bar.setValue(max(0,min(value,100)))
         self.status_label.setText(message)
+        if self.job and self.job.operation == 'dub':
+            self.start_button.setText(message)
 
     def on_success(self, result):
         self.progress_bar.setValue(100)
         if self.job and self.job.operation=='dub':
             self.last_output=result;self.open_button.setEnabled(True)
-            self.status_label.setText('配音完成，原视频和字幕保持不变')
+            self.status_label.setText('配音完成')
+            self._completion_text = '配音完成'
+            self.start_button.setText('配音完成')
             self.finished.emit(result)
         else:
-            if self.job and self.job.operation in ('runtime', 'prepare', 'check_runtime'):
+            if self.job and self.job.operation in ('runtime', 'check_runtime'):
                 key = self.environment_key(self.job.config['model_id'])
                 self.environment_checks[key] = (True, '运行环境可用')
             self.status_label.setText(result);self.runtime_status.setText(result)
 
     def on_failure(self, message):
         canceled=self.job is not None and self.job.cancel_event.is_set()
-        if self.job and self.job.operation in ('runtime', 'prepare', 'check_runtime') and not canceled:
+        if self.job and self.job.operation in ('runtime', 'check_runtime') and not canceled:
             ready = self.job.runtime_ready
             self.environment_checks[self.environment_key(self.job.config['model_id'])] = (ready, '运行环境可用' if ready else message)
-        self.status_label.setText('已取消，完成的句子已缓存，可再次开始继续' if canceled else '任务未完成，请查看原因')
-        self.details.setPlainText(message);self.details.show()
+        if canceled:
+            self._completion_text = '开始配音'
+            self.status_label.setText('已取消')
+            InfoBar.info('已取消', '', duration=3000, parent=self)
+        else:
+            self._completion_text = '重新配音'
+            self.status_label.setText('配音失败')
+            self.status_label.setToolTip(message)
+            from app.core.utils.logger import setup_logger
+            logger = setup_logger('dubbing')
+            logger.error('配音任务未完成: %s', message)
+            summary = message.splitlines()[0]
+            if not any('\u4e00' <= char <= '\u9fff' for char in summary):
+                summary = '处理失败，请查看日志'
+            InfoBar.error('配音失败' if self.job and self.job.operation == 'dub' else '操作失败', summary[:120], duration=5000, parent=self)
+        self.details.hide()
 
     def job_finished(self):
         job=self.job;self.job=None
@@ -420,12 +476,15 @@ class DubbingInterface(QWidget):
         self.settings_widget.setEnabled(True)
         for field in (self.video_input,self.subtitle_input,self.output_input):field.setEnabled(True)
         self.update_ready()
+        if job and job.operation == 'dub' and getattr(self, '_completion_text', None):
+            self.start_button.setText(self._completion_text)
         self.setup_finished.emit()
 
     def cancel_job(self):
         if self.job:
             self.job.cancel_event.set();self.cancel_button.setEnabled(False)
-            self.status_label.setText('正在取消，保留已完成的句子…')
+            self.status_label.setText('正在取消')
+            if self.job.operation == 'dub': self.start_button.setText('正在取消')
 
     def open_output(self):
         if self.last_output: QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.last_output).parent)))
